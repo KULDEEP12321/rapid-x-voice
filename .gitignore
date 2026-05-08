@@ -1,0 +1,28 @@
+# Environment variables
+.env
+.env.local
+.env.bak*
+.env.*.bak
+*.env.backup
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Frontend build artifacts
+node_modules/
+dist/
+build/
+.DS_Store
+
+# Logs (may contain phone numbers / transcripts / API errors with keys)
+logs/
+*.log
+
+# IDE settings
+.vscode/
+.idea/

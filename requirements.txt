@@ -1,0 +1,7 @@
+livekit-agents>=1.5.7
+livekit-api>=1.1.0
+livekit-plugins-google>=1.5.7
+livekit-plugins-silero>=1.5.7
+livekit-plugins-noise-cancellation
+python-dotenv>=1.0.0
+certifi>=2024.0.0

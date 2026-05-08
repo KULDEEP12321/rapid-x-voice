@@ -1,0 +1,16 @@
+services:
+  agent:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    network_mode: host
+
+  dashboard:
+    build: .
+    command: python dashboard_server.py
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "${PORT:-3000}:${PORT:-3000}"

@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Login · Rapid X AI Voice</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/lucide@latest"></script>
+</head>
+<body class="min-h-screen bg-zinc-950 text-zinc-100 antialiased">
+  <main class="flex min-h-screen items-center justify-center px-4 py-10">
+    <section class="w-full max-w-sm rounded-lg border border-white/10 bg-zinc-900 p-6 shadow-2xl shadow-black/30">
+      <div class="mb-6">
+        <div class="mb-3 inline-flex h-10 w-10 items-center justify-center rounded-lg bg-emerald-500 text-zinc-950">
+          <i data-lucide="lock-keyhole" class="h-5 w-5"></i>
+        </div>
+        <h1 class="text-2xl font-semibold text-white">Rapid X AI Voice</h1>
+        <p class="mt-2 text-sm leading-6 text-zinc-400">Sign in to manage outbound calls.</p>
+      </div>
+
+      <form id="login-form" class="space-y-4">
+        <label class="block">
+          <span class="mb-1.5 block text-sm font-medium text-zinc-300">Username</span>
+          <input name="username" type="email" autocomplete="username" required class="h-11 w-full rounded-lg border border-white/10 bg-zinc-950 px-3 text-sm text-white outline-none transition placeholder:text-zinc-600 focus:border-emerald-400">
+        </label>
+
+        <label class="block">
+          <span class="mb-1.5 block text-sm font-medium text-zinc-300">Password</span>
+          <input name="password" type="password" autocomplete="current-password" required class="h-11 w-full rounded-lg border border-white/10 bg-zinc-950 px-3 text-sm text-white outline-none transition placeholder:text-zinc-600 focus:border-emerald-400">
+        </label>
+
+        <button id="login-submit" type="submit" class="inline-flex h-11 w-full items-center justify-center gap-2 rounded-lg bg-emerald-500 px-4 text-sm font-semibold text-zinc-950 transition hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-60">
+          <i data-lucide="log-in" class="h-4 w-4"></i>
+          Sign In
+        </button>
+
+        <div id="login-status" class="hidden rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-200"></div>
+      </form>
+    </section>
+  </main>
+
+  <script>
+    const form = document.getElementById("login-form");
+    const statusEl = document.getElementById("login-status");
+    const submit = document.getElementById("login-submit");
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      statusEl.classList.add("hidden");
+      submit.disabled = true;
+      const formData = new FormData(form);
+      try {
+        const res = await fetch("/api/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            username: formData.get("username"),
+            password: formData.get("password")
+          })
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "Login failed");
+        window.location.href = "/";
+      } catch (error) {
+        statusEl.textContent = error.message;
+        statusEl.classList.remove("hidden");
+      } finally {
+        submit.disabled = false;
+      }
+    });
+
+    lucide.createIcons();
+  </script>
+</body>
+</html>

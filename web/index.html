@@ -1,0 +1,460 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Rapid X AI Voice</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ["Inter", "ui-sans-serif", "system-ui", "sans-serif"]
+          }
+        }
+      }
+    };
+  </script>
+</head>
+<body class="min-h-screen bg-zinc-950 text-zinc-100 antialiased">
+  <main class="mx-auto flex min-h-screen w-full max-w-7xl flex-col gap-6 px-4 py-5 sm:px-6 lg:px-8">
+    <header class="flex flex-col gap-4 border-b border-white/10 pb-5 lg:flex-row lg:items-end lg:justify-between">
+      <div>
+        <div class="mb-3 inline-flex items-center gap-2 rounded-lg border border-emerald-500/20 bg-emerald-500/10 px-3 py-1 text-xs font-medium text-emerald-200">
+          <span class="h-2 w-2 rounded-full bg-emerald-400"></span>
+          Gemini Live / LiveKit / SIP
+        </div>
+        <h1 class="text-3xl font-semibold tracking-normal text-white sm:text-4xl">Rapid X AI Voice</h1>
+        <p class="mt-2 max-w-2xl text-sm leading-6 text-zinc-400">Outbound voice agent control panel.</p>
+      </div>
+      <div class="grid grid-cols-3 gap-2 text-right text-xs text-zinc-400">
+        <div class="rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2">
+          <div class="text-zinc-500">Prompt</div>
+          <div id="prompt-budget-pill" class="font-medium text-emerald-200">0/300</div>
+        </div>
+        <div class="rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2">
+          <div class="text-zinc-500">Calls</div>
+          <div id="active-count-pill" class="font-medium text-white">0</div>
+        </div>
+        <div class="rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2">
+          <div class="text-zinc-500">Transcript</div>
+          <div id="transcript-state-pill" class="font-medium text-zinc-300">idle</div>
+        </div>
+      </div>
+      <button id="logout-button" type="button" class="inline-flex h-9 items-center justify-center gap-2 rounded-lg border border-white/10 px-3 text-xs font-medium text-zinc-300 transition hover:bg-white/5 lg:self-start">
+        <i data-lucide="log-out" class="h-3.5 w-3.5"></i>
+        Sign Out
+      </button>
+    </header>
+
+    <section class="grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+      <form id="single-form" class="rounded-lg border border-white/10 bg-zinc-900/80 p-5 shadow-xl shadow-black/20">
+        <div class="mb-5 flex items-center justify-between gap-3">
+          <div>
+            <h2 class="text-lg font-semibold text-white">Single Call</h2>
+            <p class="mt-1 text-xs text-zinc-500">Dispatch one warm-agent room.</p>
+          </div>
+          <i data-lucide="phone-call" class="h-5 w-5 text-emerald-300"></i>
+        </div>
+
+        <div class="space-y-4">
+          <label class="block">
+            <span class="mb-1.5 block text-sm font-medium text-zinc-300">Phone Number</span>
+            <input id="single-phone" required type="tel" placeholder="+919876543210" class="h-11 w-full rounded-lg border border-white/10 bg-zinc-950 px-3 text-sm text-white outline-none ring-0 transition focus:border-emerald-400">
+          </label>
+
+          <label class="block">
+            <span class="mb-1.5 flex items-center justify-between gap-3 text-sm font-medium text-zinc-300">
+              <span>System Prompt</span>
+              <span id="single-token-count" class="text-xs font-normal text-zinc-500">0/300</span>
+            </span>
+            <textarea id="single-system" rows="4" placeholder="You are Priya from Rapid X. Introduce yourself, reply in 1-2 sentences, ask one question at a time, and transfer if asked for a human." class="w-full resize-none rounded-lg border border-white/10 bg-zinc-950 px-3 py-2 text-sm text-white outline-none transition placeholder:text-zinc-600 focus:border-emerald-400"></textarea>
+            <p id="single-prompt-warning" class="mt-1 hidden text-xs text-amber-300">Prompt is above the realtime budget. Move knowledge into campaign context or prefetch.</p>
+          </label>
+
+          <label class="block">
+            <span class="mb-1.5 block text-sm font-medium text-zinc-300">Campaign Context</span>
+            <textarea id="single-prompt" rows="3" placeholder="Parent inquired about Grade 5 admission yesterday." class="w-full resize-none rounded-lg border border-white/10 bg-zinc-950 px-3 py-2 text-sm text-white outline-none transition placeholder:text-zinc-600 focus:border-emerald-400"></textarea>
+          </label>
+
+          <label class="block">
+            <span class="mb-1.5 block text-sm font-medium text-zinc-300">Lead Context</span>
+            <textarea id="single-lead" rows="2" placeholder="Optional per-caller context from CRM." class="w-full resize-none rounded-lg border border-white/10 bg-zinc-950 px-3 py-2 text-sm text-white outline-none transition placeholder:text-zinc-600 focus:border-emerald-400"></textarea>
+          </label>
+
+          <div class="grid grid-cols-2 gap-4">
+            <label class="block">
+              <span class="mb-1.5 block text-sm font-medium text-zinc-300">Voice</span>
+              <select id="single-voice" class="h-11 w-full rounded-lg border border-white/10 bg-zinc-950 px-3 text-sm text-white outline-none transition focus:border-emerald-400"></select>
+            </label>
+            <label class="block">
+              <span class="mb-1.5 flex items-center justify-between text-sm font-medium text-zinc-300">
+                <span>Temperature</span>
+                <span id="single-temp-value" class="text-xs text-zinc-500">0.8</span>
+              </span>
+              <input id="single-temperature" type="range" min="0" max="2" step="0.1" value="0.8" class="h-11 w-full accent-emerald-400">
+            </label>
+          </div>
+
+          <button id="single-submit" type="submit" class="inline-flex h-11 w-full items-center justify-center gap-2 rounded-lg bg-emerald-500 px-4 text-sm font-semibold text-zinc-950 transition hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-60">
+            <i data-lucide="send" class="h-4 w-4"></i>
+            Initiate Call
+          </button>
+          <div id="single-status" class="hidden rounded-lg border px-3 py-2 text-sm"></div>
+        </div>
+      </form>
+
+      <form id="bulk-form" class="rounded-lg border border-white/10 bg-zinc-900/80 p-5 shadow-xl shadow-black/20">
+        <div class="mb-5 flex items-center justify-between gap-3">
+          <div>
+            <h2 class="text-lg font-semibold text-white">Bulk Queue</h2>
+            <p class="mt-1 text-xs text-zinc-500">Queue many outbound calls.</p>
+          </div>
+          <i data-lucide="list-plus" class="h-5 w-5 text-cyan-300"></i>
+        </div>
+
+        <div class="space-y-4">
+          <label class="block">
+            <span class="mb-1.5 block text-sm font-medium text-zinc-300">Phone Numbers</span>
+            <textarea id="bulk-numbers" required rows="5" placeholder="+919876543210&#10;+919988776655" class="w-full resize-none rounded-lg border border-white/10 bg-zinc-950 px-3 py-2 font-mono text-sm text-white outline-none transition placeholder:text-zinc-600 focus:border-cyan-400"></textarea>
+          </label>
+
+          <label class="block">
+            <span class="mb-1.5 flex items-center justify-between gap-3 text-sm font-medium text-zinc-300">
+              <span>System Prompt</span>
+              <span id="bulk-token-count" class="text-xs font-normal text-zinc-500">0/300</span>
+            </span>
+            <textarea id="bulk-system" rows="4" placeholder="You are Priya from Rapid X. Introduce yourself, reply in 1-2 sentences, ask one question at a time, and transfer if asked for a human." class="w-full resize-none rounded-lg border border-white/10 bg-zinc-950 px-3 py-2 text-sm text-white outline-none transition placeholder:text-zinc-600 focus:border-cyan-400"></textarea>
+            <p id="bulk-prompt-warning" class="mt-1 hidden text-xs text-amber-300">Prompt is above the realtime budget. Move knowledge into campaign context or prefetch.</p>
+          </label>
+
+          <label class="block">
+            <span class="mb-1.5 block text-sm font-medium text-zinc-300">Campaign Context</span>
+            <input id="bulk-prompt" type="text" placeholder="Admissions callback campaign." class="h-11 w-full rounded-lg border border-white/10 bg-zinc-950 px-3 text-sm text-white outline-none transition placeholder:text-zinc-600 focus:border-cyan-400">
+          </label>
+
+          <div class="grid grid-cols-2 gap-4">
+            <label class="block">
+              <span class="mb-1.5 block text-sm font-medium text-zinc-300">Voice</span>
+              <select id="bulk-voice" class="h-11 w-full rounded-lg border border-white/10 bg-zinc-950 px-3 text-sm text-white outline-none transition focus:border-cyan-400"></select>
+            </label>
+            <label class="block">
+              <span class="mb-1.5 flex items-center justify-between text-sm font-medium text-zinc-300">
+                <span>Temperature</span>
+                <span id="bulk-temp-value" class="text-xs text-zinc-500">0.8</span>
+              </span>
+              <input id="bulk-temperature" type="range" min="0" max="2" step="0.1" value="0.8" class="h-11 w-full accent-cyan-400">
+            </label>
+          </div>
+
+          <button id="bulk-submit" type="submit" class="inline-flex h-11 w-full items-center justify-center gap-2 rounded-lg bg-cyan-400 px-4 text-sm font-semibold text-zinc-950 transition hover:bg-cyan-300 disabled:cursor-not-allowed disabled:opacity-60">
+            <i data-lucide="rocket" class="h-4 w-4"></i>
+            Launch Campaign
+          </button>
+          <div id="bulk-status" class="hidden rounded-lg border px-3 py-2 text-sm"></div>
+          <div id="bulk-results" class="max-h-48 space-y-2 overflow-y-auto"></div>
+        </div>
+      </form>
+    </section>
+
+    <section class="grid gap-6 xl:grid-cols-[minmax(0,1.15fr)_minmax(0,0.85fr)]">
+      <div class="rounded-lg border border-white/10 bg-zinc-900/80 p-5 shadow-xl shadow-black/20">
+        <div class="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div class="flex items-center gap-3">
+            <i data-lucide="message-circle" class="h-5 w-5 text-amber-300"></i>
+            <h2 class="text-lg font-semibold text-white">Live Transcript</h2>
+            <span id="transcript-connection" class="rounded-lg border border-white/10 px-2 py-1 text-xs text-zinc-400">idle</span>
+          </div>
+          <button id="clear-transcript" type="button" class="inline-flex h-9 items-center justify-center gap-2 rounded-lg border border-white/10 px-3 text-xs font-medium text-zinc-300 transition hover:bg-white/5">
+            <i data-lucide="trash-2" class="h-3.5 w-3.5"></i>
+            Clear
+          </button>
+        </div>
+        <div id="transcript-list" class="h-80 space-y-2 overflow-y-auto pr-1">
+          <div class="rounded-lg border border-dashed border-white/10 p-8 text-center text-sm text-zinc-500">Waiting for transcripts.</div>
+        </div>
+      </div>
+
+      <div class="rounded-lg border border-white/10 bg-zinc-900/80 p-5 shadow-xl shadow-black/20">
+        <div class="mb-4 flex items-center justify-between gap-3">
+          <div class="flex items-center gap-3">
+            <i data-lucide="activity" class="h-5 w-5 text-rose-300"></i>
+            <h2 class="text-lg font-semibold text-white">Live Calls</h2>
+          </div>
+          <button id="refresh-calls" type="button" class="inline-flex h-9 items-center justify-center gap-2 rounded-lg border border-white/10 px-3 text-xs font-medium text-zinc-300 transition hover:bg-white/5">
+            <i data-lucide="refresh-cw" class="h-3.5 w-3.5"></i>
+            Refresh
+          </button>
+        </div>
+        <div id="calls-list" class="space-y-2">
+          <div class="rounded-lg border border-dashed border-white/10 p-8 text-center text-sm text-zinc-500">No active calls.</div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const TOKEN_TARGET = 300;
+    const voices = [
+      ["Aoede", "Breezy, warm"],
+      ["Kore", "Firm, confident"],
+      ["Zephyr", "Bright, friendly"],
+      ["Leda", "Youthful"],
+      ["Puck", "Upbeat, conversational"],
+      ["Charon", "Informative, deeper"],
+      ["Fenrir", "Excitable, energetic"],
+      ["Orus", "Firm, professional"]
+    ];
+
+    const state = { transcriptSince: 0, transcriptRecords: [] };
+    const $ = (id) => document.getElementById(id);
+
+    function estimatePromptTokens(text) {
+      const words = String(text || "").trim().split(/\s+/).filter(Boolean).length;
+      return Math.ceil(words * 1.3);
+    }
+
+    function setStatus(id, kind, text) {
+      const el = $(id);
+      el.className = "rounded-lg border px-3 py-2 text-sm";
+      if (kind === "success") el.classList.add("border-emerald-500/30", "bg-emerald-500/10", "text-emerald-200");
+      else if (kind === "error") el.classList.add("border-red-500/30", "bg-red-500/10", "text-red-200");
+      else el.classList.add("border-white/10", "bg-white/[0.03]", "text-zinc-300");
+      el.textContent = text;
+      el.classList.remove("hidden");
+    }
+
+    function initVoices() {
+      for (const id of ["single-voice", "bulk-voice"]) {
+        const select = $(id);
+        select.innerHTML = voices.map(([name, label]) => `<option value="${name}">${name} - ${label}</option>`).join("");
+        select.value = localStorage.getItem(`rapidx.${id}`) || "Aoede";
+        select.addEventListener("change", () => localStorage.setItem(`rapidx.${id}`, select.value));
+      }
+    }
+
+    function bindPromptBudget(prefix) {
+      const textarea = $(`${prefix}-system`);
+      const count = $(`${prefix}-token-count`);
+      const warning = $(`${prefix}-prompt-warning`);
+      textarea.value = localStorage.getItem(`rapidx.${prefix}.system`) || "";
+      const update = () => {
+        const tokens = estimatePromptTokens(textarea.value);
+        count.textContent = `${tokens}/${TOKEN_TARGET}`;
+        count.className = tokens > TOKEN_TARGET ? "text-xs font-normal text-amber-300" : "text-xs font-normal text-zinc-500";
+        warning.classList.toggle("hidden", tokens <= TOKEN_TARGET);
+        $("prompt-budget-pill").textContent = `${tokens}/${TOKEN_TARGET}`;
+        $("prompt-budget-pill").className = tokens > TOKEN_TARGET ? "font-medium text-amber-300" : "font-medium text-emerald-200";
+        localStorage.setItem(`rapidx.${prefix}.system`, textarea.value);
+      };
+      textarea.addEventListener("input", update);
+      update();
+    }
+
+    async function postJson(url, payload) {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      return data;
+    }
+
+    $("single-temperature").addEventListener("input", (e) => {
+      $("single-temp-value").textContent = Number(e.target.value).toFixed(1);
+    });
+    $("bulk-temperature").addEventListener("input", (e) => {
+      $("bulk-temp-value").textContent = Number(e.target.value).toFixed(1);
+    });
+
+    $("single-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const button = $("single-submit");
+      button.disabled = true;
+      setStatus("single-status", "neutral", "Dispatching...");
+      try {
+        const data = await postJson("/api/dispatch", {
+          phoneNumber: $("single-phone").value,
+          prompt: $("single-prompt").value,
+          leadContext: $("single-lead").value,
+          systemPrompt: $("single-system").value,
+          voice: $("single-voice").value,
+          temperature: Number($("single-temperature").value)
+        });
+        setStatus("single-status", "success", `Call dispatched to ${$("single-phone").value} (${data.roomName})`);
+        await fetchCalls();
+      } catch (error) {
+        setStatus("single-status", "error", error.message);
+      } finally {
+        button.disabled = false;
+      }
+    });
+
+    $("bulk-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const button = $("bulk-submit");
+      button.disabled = true;
+      $("bulk-results").innerHTML = "";
+      setStatus("bulk-status", "neutral", "Processing queue...");
+      const numbers = $("bulk-numbers").value.split(/[\n,]+/).map((item) => item.trim()).filter(Boolean);
+      try {
+        const data = await postJson("/api/queue", {
+          numbers,
+          prompt: $("bulk-prompt").value,
+          systemPrompt: $("bulk-system").value,
+          voice: $("bulk-voice").value,
+          temperature: Number($("bulk-temperature").value)
+        });
+        setStatus("bulk-status", "success", data.message || "Queue processed.");
+        renderBulkResults(data.results || []);
+        await fetchCalls();
+      } catch (error) {
+        setStatus("bulk-status", "error", error.message);
+      } finally {
+        button.disabled = false;
+      }
+    });
+
+    function renderBulkResults(results) {
+      $("bulk-results").innerHTML = results.map((row) => {
+        const ok = row.status === "dispatched";
+        const classes = ok ? "border-emerald-500/20 text-emerald-200" : "border-red-500/20 text-red-200";
+        return `<div class="flex items-center justify-between gap-3 rounded-lg border ${classes} bg-white/[0.03] px-3 py-2 text-xs">
+          <span class="font-mono text-zinc-300">${row.phoneNumber || ""}</span>
+          <span>${ok ? "Sent" : (row.error || "Failed")}</span>
+        </div>`;
+      }).join("");
+    }
+
+    function formatRelative(unix) {
+      if (!unix) return "-";
+      const seconds = Math.max(0, Math.floor(Date.now() / 1000 - unix));
+      if (seconds < 60) return `${seconds}s ago`;
+      if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
+      return `${Math.floor(seconds / 3600)}h ago`;
+    }
+
+    async function fetchCalls() {
+      try {
+        const res = await fetch("/api/calls", { cache: "no-store" });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "Failed to fetch calls");
+        renderCalls(data.calls || []);
+      } catch (error) {
+        $("calls-list").innerHTML = `<div class="rounded-lg border border-red-500/20 bg-red-500/10 p-4 text-sm text-red-200">${error.message}</div>`;
+      }
+    }
+
+    function renderCalls(calls) {
+      $("active-count-pill").textContent = String(calls.length);
+      if (!calls.length) {
+        $("calls-list").innerHTML = '<div class="rounded-lg border border-dashed border-white/10 p-8 text-center text-sm text-zinc-500">No active calls.</div>';
+        return;
+      }
+      $("calls-list").innerHTML = calls.map((call) => `
+        <div class="rounded-lg border border-white/10 bg-zinc-950/70 p-3">
+          <div class="flex items-start justify-between gap-3">
+            <div class="min-w-0">
+              <div class="truncate font-mono text-sm text-white">${call.phone || "-"}</div>
+              <div class="mt-1 truncate text-xs text-zinc-500">${call.roomName}</div>
+            </div>
+            <button data-room="${call.roomName}" class="hangup-btn inline-flex h-8 shrink-0 items-center gap-1.5 rounded-lg border border-red-500/20 px-2.5 text-xs font-medium text-red-200 transition hover:bg-red-500/10">
+              <i data-lucide="phone-off" class="h-3.5 w-3.5"></i>
+              Hang up
+            </button>
+          </div>
+          <div class="mt-3 grid grid-cols-3 gap-2 text-xs text-zinc-400">
+            <span>Voice: ${call.voice || "-"}</span>
+            <span>Participants: ${call.numParticipants}</span>
+            <span>${formatRelative(call.creationTime)}</span>
+          </div>
+        </div>
+      `).join("");
+      document.querySelectorAll(".hangup-btn").forEach((button) => {
+        button.addEventListener("click", async () => {
+          button.disabled = true;
+          await fetch("/api/calls", {
+            method: "DELETE",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ roomName: button.dataset.room })
+          });
+          await fetchCalls();
+        });
+      });
+      lucide.createIcons();
+    }
+
+    function formatTime(ts) {
+      return new Date(ts * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    }
+
+    async function fetchTranscripts() {
+      const params = new URLSearchParams({ since: String(state.transcriptSince), tail: "200" });
+      try {
+        const res = await fetch(`/api/transcripts?${params}`, { cache: "no-store" });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "Transcript fetch failed");
+        if (data.records && data.records.length) {
+          state.transcriptRecords = state.transcriptRecords.concat(data.records).slice(-500);
+          state.transcriptSince = data.lastTs || state.transcriptSince;
+          renderTranscripts();
+        }
+        $("transcript-connection").textContent = "connected";
+        $("transcript-state-pill").textContent = "connected";
+      } catch {
+        $("transcript-connection").textContent = "disconnected";
+        $("transcript-state-pill").textContent = "offline";
+      }
+    }
+
+    function renderTranscripts() {
+      const styles = {
+        user: ["Caller", "border-emerald-500/20", "text-emerald-200"],
+        agent: ["Agent", "border-cyan-500/20", "text-cyan-200"],
+        system: ["System", "border-white/10", "text-zinc-400"]
+      };
+      if (!state.transcriptRecords.length) {
+        $("transcript-list").innerHTML = '<div class="rounded-lg border border-dashed border-white/10 p-8 text-center text-sm text-zinc-500">Waiting for transcripts.</div>';
+        return;
+      }
+      $("transcript-list").innerHTML = state.transcriptRecords.map((record) => {
+        const style = styles[record.role] || styles.system;
+        return `<div class="rounded-lg border ${style[1]} bg-zinc-950/70 p-3">
+          <div class="mb-1 flex items-center gap-2 text-xs">
+            <span class="${style[2]} font-medium">${style[0]}</span>
+            <span class="text-zinc-600">${formatTime(record.ts)}</span>
+            <span class="truncate font-mono text-zinc-600">${record.room || ""}</span>
+          </div>
+          <div class="break-words text-sm leading-6 text-zinc-200">${record.text || ""}</div>
+        </div>`;
+      }).join("");
+      const list = $("transcript-list");
+      list.scrollTo({ top: list.scrollHeight, behavior: "smooth" });
+    }
+
+    $("refresh-calls").addEventListener("click", fetchCalls);
+    $("logout-button").addEventListener("click", async () => {
+      await fetch("/api/logout", { method: "POST" });
+      window.location.href = "/login";
+    });
+    $("clear-transcript").addEventListener("click", () => {
+      state.transcriptRecords = [];
+      state.transcriptSince = 0;
+      renderTranscripts();
+    });
+
+    initVoices();
+    bindPromptBudget("single");
+    bindPromptBudget("bulk");
+    lucide.createIcons();
+    fetchCalls();
+    fetchTranscripts();
+    setInterval(fetchCalls, 5000);
+    setInterval(fetchTranscripts, 1500);
+  </script>
+</body>
+</html>
