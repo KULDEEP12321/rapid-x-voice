@@ -82,6 +82,7 @@ Set these server env values in `.env` if your service names differ:
 
 ```bash
 DEPLOY_WEBHOOK_SECRET=replace-with-a-long-random-secret
+DEPLOY_RUNNER=auto
 DEPLOY_REPO_DIR=/opt/livekit-ai-voice
 DEPLOY_BRANCH=main
 DEPLOY_WORKER_SERVICE=livekit-agent.service

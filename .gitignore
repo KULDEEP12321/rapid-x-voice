@@ -23,6 +23,10 @@ build/
 logs/
 *.log
 
+# macOS AppleDouble files from copied server bundles
+._*
+**/._*
+
 # IDE settings
 .vscode/
 .idea/

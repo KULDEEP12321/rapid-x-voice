@@ -261,6 +261,7 @@ class DashboardServerTests(unittest.TestCase):
                 dashboard_server.start_github_deploy(
                     payload,
                     env={
+                        "DEPLOY_RUNNER": "direct",
                         "DEPLOY_REPO_DIR": str(root),
                         "DEPLOY_SCRIPT": str(script),
                         "DEPLOY_LOG": str(log),
@@ -274,6 +275,43 @@ class DashboardServerTests(unittest.TestCase):
                 self.assertEqual(kwargs["cwd"], str(root))
                 self.assertTrue(kwargs["start_new_session"])
                 self.assertEqual(kwargs["env"]["GITHUB_DEPLOY_COMMIT"], "abc123")
+
+    def test_start_github_deploy_can_use_systemd_run_outside_dashboard_cgroup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script = root / "scripts" / "deploy_from_github.sh"
+            script.parent.mkdir()
+            script.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+            log = root / "logs" / "deploy.log"
+            payload = {"ref": "refs/heads/main", "after": "abc123"}
+
+            with patch("dashboard_server.subprocess.Popen") as popen:
+                dashboard_server.start_github_deploy(
+                    payload,
+                    env={
+                        "DEPLOY_RUNNER": "systemd",
+                        "DEPLOY_REPO_DIR": str(root),
+                        "DEPLOY_SCRIPT": str(script),
+                        "DEPLOY_LOG": str(log),
+                        "DEPLOY_BRANCH": "main",
+                        "DEPLOY_WORKER_SERVICE": "rapid-voice-agent.service",
+                        "DEPLOY_DASHBOARD_SERVICE": "rapid-dashboard.service",
+                    },
+                )
+
+                popen.assert_called_once()
+                args, kwargs = popen.call_args
+                command = args[0]
+                self.assertEqual(command[0], "systemd-run")
+                self.assertIn("--collect", command)
+                self.assertIn(f"--working-directory={root}", command)
+                self.assertIn(f"--property=StandardOutput=append:{log}", command)
+                self.assertIn(
+                    "--setenv=DEPLOY_DASHBOARD_SERVICE=rapid-dashboard.service",
+                    command,
+                )
+                self.assertEqual(command[-1], str(script))
+                self.assertEqual(kwargs["stdout"], dashboard_server.subprocess.DEVNULL)
 
 
 if __name__ == "__main__":

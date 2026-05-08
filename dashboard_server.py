@@ -14,6 +14,7 @@ import logging
 import os
 import random
 import re
+import shutil
 import subprocess
 import time
 from http import HTTPStatus
@@ -256,6 +257,50 @@ def start_github_deploy(
     process_env.update({str(k): str(v) for k, v in source.items()})
     process_env["GITHUB_DEPLOY_COMMIT"] = str(payload.get("after") or "")
     process_env["GITHUB_DEPLOY_REF"] = str(payload.get("ref") or "")
+
+    runner = str(source.get("DEPLOY_RUNNER") or "auto").lower()
+    use_systemd = runner == "systemd" or (
+        runner == "auto"
+        and Path("/run/systemd/system").exists()
+        and shutil.which("systemd-run") is not None
+    )
+    if use_systemd:
+        unit = f"livekit-ai-voice-deploy-{int(time.time() * 1000)}"
+        command = [
+            "systemd-run",
+            "--collect",
+            "--quiet",
+            f"--unit={unit}",
+            f"--working-directory={repo_dir}",
+            f"--property=StandardOutput=append:{log_path}",
+            f"--property=StandardError=append:{log_path}",
+        ]
+        for name in (
+            "GITHUB_DEPLOY_COMMIT",
+            "GITHUB_DEPLOY_REF",
+            "DEPLOY_REPO_DIR",
+            "DEPLOY_APP_DIR",
+            "DEPLOY_BRANCH",
+            "DEPLOY_REMOTE",
+            "DEPLOY_WORKER_SERVICE",
+            "DEPLOY_DASHBOARD_SERVICE",
+            "DEPLOY_LOCK_FILE",
+            "EXPECTED_LIVEKIT_REGION",
+        ):
+            value = process_env.get(name)
+            if value:
+                command.append(f"--setenv={name}={value}")
+        command.append(str(script))
+        subprocess.Popen(
+            command,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            env=process_env,
+            start_new_session=True,
+            close_fds=True,
+        )
+        return
 
     with log_path.open("ab") as log_file:
         subprocess.Popen(
