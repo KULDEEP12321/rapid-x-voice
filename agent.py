@@ -17,17 +17,19 @@ import json
 import logging
 import math
 import time
+import wave
 from dataclasses import asdict, is_dataclass
 from typing import Any, Optional
 
 import config
 from google.genai import types as gtypes
-from livekit import agents, api
+from livekit import agents, api, rtc
 from livekit.agents import Agent, AgentSession, NOT_GIVEN, RoomInputOptions, llm
 from livekit.agents.llm import ChatMessage
 from livekit.plugins import google, noise_cancellation, silero
 
-logging.basicConfig(level=logging.INFO)
+_LOG_LEVEL = os.getenv("LIVEKIT_LOG_LEVEL", "info").upper()
+logging.basicConfig(level=getattr(logging, _LOG_LEVEL, logging.INFO))
 logger = logging.getLogger("voice-agent")
 
 
@@ -37,6 +39,7 @@ logger = logging.getLogger("voice-agent")
 # ---------------------------------------------------------------------------
 TRANSCRIPT_LOG = "/tmp/transcripts.jsonl"
 METRICS_LOG = os.getenv("VOICE_METRICS_LOG", "/tmp/voice-agent-metrics.jsonl")
+RECORDINGS_DIR = os.getenv("VOICE_RECORDINGS_DIR", "/opt/livekit-ai-voice/recordings")
 PROMPT_TOKEN_TARGET = int(os.getenv("REALTIME_PROMPT_TOKEN_TARGET", "300"))
 LOW_LATENCY_VOICE_RULES = (
     "Low-latency voice rules: reply in one short sentence. "
@@ -132,11 +135,6 @@ def _build_session_instructions(meta: dict) -> str:
 def _build_turn_handling():
     return {
         "turn_detection": "realtime_llm",
-        "endpointing": {
-            "mode": "fixed",
-            "min_delay": 0.25,
-            "max_delay": 0.5,
-        },
         "interruption": {
             "enabled": True,
             "mode": "vad",
@@ -148,7 +146,7 @@ def _build_turn_handling():
         },
         "preemptive_generation": {
             "enabled": True,
-            "preemptive_tts": False,
+            "preemptive_tts": True,
             "max_speech_duration": 8.0,
         },
     }
@@ -160,22 +158,24 @@ def _build_realtime_input_config():
             disabled=False,
             start_of_speech_sensitivity=gtypes.StartSensitivity.START_SENSITIVITY_HIGH,
             end_of_speech_sensitivity=gtypes.EndSensitivity.END_SENSITIVITY_HIGH,
-            prefix_padding_ms=80,
-            silence_duration_ms=300,
+            prefix_padding_ms=20,
+            silence_duration_ms=200,
         ),
         activity_handling=gtypes.ActivityHandling.START_OF_ACTIVITY_INTERRUPTS,
         turn_coverage=gtypes.TurnCoverage.TURN_INCLUDES_ONLY_ACTIVITY,
     )
 
 
-def _build_vad():
-    return silero.VAD.load(
-        min_speech_duration=0.025,
-        min_silence_duration=0.25,
-        prefix_padding_duration=0.1,
-        activation_threshold=0.42,
-        sample_rate=16000,
-    )
+# Loaded once at import; LiveKit's latency guidance: prewarm VAD before
+# the first job lands so entrypoint() doesn't pay model-load on cold start.
+# Tuned for barge-in only — turn-end is owned by Gemini's server-side VAD.
+_VAD = silero.VAD.load(
+    min_speech_duration=0.05,
+    min_silence_duration=0.10,
+    prefix_padding_duration=0.05,
+    activation_threshold=0.5,
+    sample_rate=16000,
+)
 
 
 def _is_target_sip_participant(participant: Any, phone_number: str | None) -> bool:
@@ -202,6 +202,60 @@ def _emit_transcript(room: str, role: str, text: str, is_final: bool = True):
     except Exception as e:
         logger.warning("transcript write failed: %s", e)
     logger.info("[%s] %s: %s", role.upper(), room, text[:120])
+
+
+async def _record_track_to_wav(
+    track: rtc.Track,
+    file_path: str,
+    room_name: str,
+    participant_identity: str,
+):
+    """Stream audio from a remote track to a local WAV file until the track ends."""
+    started = time.time()
+    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+
+    audio_stream = rtc.AudioStream(track)
+    wf: Optional[wave.Wave_write] = None
+    frame_count = 0
+    sample_rate = 0
+
+    try:
+        async for event in audio_stream:
+            frame = event.frame
+            if wf is None:
+                wf = wave.open(file_path, "wb")
+                wf.setnchannels(frame.num_channels)
+                wf.setsampwidth(2)  # LiveKit AudioFrame is 16-bit PCM
+                wf.setframerate(frame.sample_rate)
+                sample_rate = frame.sample_rate
+                _emit_metric(
+                    room_name,
+                    "recording_started",
+                    participant=participant_identity,
+                    file=file_path,
+                    sample_rate=sample_rate,
+                    channels=frame.num_channels,
+                )
+            wf.writeframes(bytes(frame.data))
+            frame_count += 1
+    except asyncio.CancelledError:
+        pass
+    except Exception as e:
+        logger.warning("recording loop error for %s: %s", participant_identity, e)
+    finally:
+        if wf is not None:
+            try:
+                wf.close()
+            except Exception:
+                pass
+        _emit_metric(
+            room_name,
+            "recording_finished",
+            participant=participant_identity,
+            file=file_path,
+            frames=frame_count,
+            duration_s=round(time.time() - started, 2),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -317,41 +371,14 @@ class TransferFunctions(llm.ToolContext):
 # ---------------------------------------------------------------------------
 # Realtime model factory
 # ---------------------------------------------------------------------------
-def _model_supports_generate_reply(model_name: str) -> bool:
-    return "3.1" not in model_name
-
-
-def _select_realtime_model_name(requires_generate_reply: bool = False) -> str:
-    configured = config.GEMINI_LIVE_MODEL
-    if requires_generate_reply and not _model_supports_generate_reply(configured):
-        fallback = config.GEMINI_PROACTIVE_REPLY_MODEL
-        if not _model_supports_generate_reply(fallback):
-            raise RuntimeError(
-                "Configured Gemini Live model cannot proactively greet via "
-                "LiveKit generate_reply, and GEMINI_PROACTIVE_REPLY_MODEL is "
-                f"also incompatible: {fallback}"
-            )
-        logger.warning(
-            "Gemini Live model %s cannot use generate_reply via LiveKit; "
-            "using proactive reply model %s for outbound greeting support.",
-            configured,
-            fallback,
-        )
-        return fallback
-    return configured
-
-
 def _build_realtime_model(voice: Optional[str] = None,
                           temperature: Optional[float] = None,
-                          system_prompt: Optional[str] = None,
-                          requires_generate_reply: bool = False):
+                          system_prompt: Optional[str] = None):
     """Create a Gemini Live realtime model. Voice / temperature / instructions
     can be overridden per-call via room metadata."""
     voice = voice or config.GEMINI_VOICE
     temp = temperature if temperature is not None else config.GEMINI_TEMPERATURE
-    model_name = _select_realtime_model_name(
-        requires_generate_reply=requires_generate_reply
-    )
+    model_name = config.GEMINI_LIVE_MODEL
 
     if not config.GEMINI_API_KEY:
         raise RuntimeError(
@@ -363,12 +390,6 @@ def _build_realtime_model(voice: Optional[str] = None,
         model_name, voice, temp,
     )
 
-    model_kwargs: dict[str, Any] = {}
-    if "3.1" in model_name:
-        model_kwargs["thinking_config"] = gtypes.ThinkingConfig(
-            thinking_level=gtypes.ThinkingLevel.MINIMAL,
-        )
-
     return google.realtime.RealtimeModel(
         model=model_name,
         api_key=config.GEMINI_API_KEY,
@@ -376,10 +397,8 @@ def _build_realtime_model(voice: Optional[str] = None,
         temperature=temp,
         instructions=system_prompt or config.SYSTEM_PROMPT,
         realtime_input_config=_build_realtime_input_config(),
-        # Ask Gemini to also emit text transcripts for both sides of the call.
         input_audio_transcription=gtypes.AudioTranscriptionConfig(),
         output_audio_transcription=gtypes.AudioTranscriptionConfig(),
-        **model_kwargs,
     )
 
 
@@ -431,54 +450,24 @@ async def entrypoint(ctx: agents.JobContext):
 
     fnc_ctx = TransferFunctions(ctx, phone_number, lead_context=lead_context)
 
-    greeting_realtime = _build_realtime_model(
+    realtime = _build_realtime_model(
         voice=meta.get("voice_id"),
         temperature=meta.get("temperature"),
         system_prompt=instructions,
-        requires_generate_reply=True,
-    )
-    main_realtime = _build_realtime_model(
-        voice=meta.get("voice_id"),
-        temperature=meta.get("temperature"),
-        system_prompt=instructions,
-        requires_generate_reply=False,
     )
 
     session = AgentSession(
-        vad=_build_vad(),
+        vad=_VAD,
         turn_handling=_build_turn_handling(),
         aec_warmup_duration=0.0,
     )
 
     tools = list(fnc_ctx.function_tools.values())
-    greeting_agent = OutboundAssistant(
+    agent = OutboundAssistant(
         tools=tools,
         instructions=instructions,
-        llm=greeting_realtime,
+        llm=realtime,
     )
-    main_agent = OutboundAssistant(
-        tools=tools,
-        instructions=instructions,
-        llm=main_realtime,
-    )
-
-    async def _switch_to_main_realtime_agent():
-        from_model = getattr(greeting_realtime, "model", "")
-        to_model = getattr(main_realtime, "model", "")
-        if from_model == to_model:
-            return
-        started = time.perf_counter()
-        session.update_agent(main_agent)
-        update_task = getattr(session, "_update_activity_atask", None)
-        if update_task:
-            await update_task
-        _emit_metric(
-            room_name,
-            "realtime_model_switched",
-            from_model=from_model,
-            to_model=to_model,
-            duration_ms=round((time.perf_counter() - started) * 1000, 2),
-        )
 
     _emit_transcript(room_name, "system", f"Call started -> {phone_number or 'inbound'}")
 
@@ -602,7 +591,7 @@ async def entrypoint(ctx: agents.JobContext):
     session_start = time.perf_counter()
     await session.start(
         room=ctx.room,
-        agent=greeting_agent,
+        agent=agent,
         room_input_options=RoomInputOptions(
             audio_frame_size_ms=20,
             pre_connect_audio=True,
@@ -617,6 +606,7 @@ async def entrypoint(ctx: agents.JobContext):
     )
 
     sip_participant_ready = asyncio.Event()
+    recording_tasks: list[asyncio.Task] = []
 
     def _mark_sip_participant_ready(participant: Any, event_name: str):
         if not _is_target_sip_participant(participant, phone_number):
@@ -627,6 +617,22 @@ async def entrypoint(ctx: agents.JobContext):
             participant_identity=getattr(participant, "identity", ""),
         )
         sip_participant_ready.set()
+
+    @ctx.room.on("track_subscribed")
+    def _on_track_subscribed(
+        track: rtc.Track,
+        publication: rtc.RemoteTrackPublication,
+        participant: rtc.RemoteParticipant,
+    ):
+        if track.kind != rtc.TrackKind.KIND_AUDIO:
+            return
+        if not _is_target_sip_participant(participant, phone_number):
+            return
+        file_path = os.path.join(RECORDINGS_DIR, f"{room_name}.wav")
+        task = asyncio.create_task(
+            _record_track_to_wav(track, file_path, room_name, participant.identity)
+        )
+        recording_tasks.append(task)
 
     @ctx.room.on("participant_connected")
     def _on_participant_connected(participant):
@@ -685,7 +691,6 @@ async def entrypoint(ctx: agents.JobContext):
                 instructions=config.INITIAL_GREETING,
                 allow_interruptions=True,
             )
-            await _switch_to_main_realtime_agent()
         except asyncio.TimeoutError:
             logger.warning(
                 "SIP participant did not join within %.1fs",
@@ -718,9 +723,13 @@ async def entrypoint(ctx: agents.JobContext):
             instructions=config.FALLBACK_GREETING,
             allow_interruptions=True,
         )
-        await _switch_to_main_realtime_agent()
 
     async def _on_shutdown():
+        for task in recording_tasks:
+            if not task.done():
+                task.cancel()
+        if recording_tasks:
+            await asyncio.gather(*recording_tasks, return_exceptions=True)
         _emit_transcript(room_name, "system", "Call ended")
 
     ctx.add_shutdown_callback(_on_shutdown)

@@ -67,10 +67,6 @@ def _gemini_api_key():
 GEMINI_API_KEY = _gemini_api_key()
 GEMINI_LIVE_MODEL = os.getenv(
     "GEMINI_LIVE_MODEL",
-    "gemini-3.1-flash-live-preview",
-)
-GEMINI_PROACTIVE_REPLY_MODEL = os.getenv(
-    "GEMINI_PROACTIVE_REPLY_MODEL",
     "gemini-2.5-flash-native-audio-preview-12-2025",
 )
 GEMINI_VOICE = os.getenv("GEMINI_VOICE", "Puck")

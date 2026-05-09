@@ -22,6 +22,7 @@ log() {
 
 cd "$APP_DIR"
 mkdir -p logs
+mkdir -p "${VOICE_RECORDINGS_DIR:-${APP_DIR}/recordings}"
 
 exec 9>"$LOCK_FILE"
 if ! flock -n 9; then
