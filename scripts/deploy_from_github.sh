@@ -41,6 +41,8 @@ if [ ! -x venv/bin/python ]; then
 fi
 
 venv/bin/python -m pip install -r requirements.txt
+log "downloading agent model/plugin files"
+venv/bin/python agent.py download-files
 
 systemctl restart "$WORKER_SERVICE"
 systemctl restart "$DASHBOARD_SERVICE"
