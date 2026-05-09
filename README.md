@@ -25,9 +25,9 @@ Outbound voice agent built on **Gemini Live** (native audio), **LiveKit** (rooms
 
 A single Gemini Live `RealtimeModel` replaces the old Deepgram + OpenAI/Groq + Cartesia/Sarvam pipeline — one streaming round-trip, lower latency, fewer keys to manage.
 
-The default realtime model is `gemini-3.1-flash-live-preview`. Set `GEMINI_LIVE_MODEL` if you need to pin or roll back to another Gemini Live model.
+The default realtime model is `gemini-2.5-flash-native-audio-preview-12-2025`. It supports native audio and proactive outbound greetings in one Gemini Live websocket.
 
-Outbound calls need the bot to speak first. In LiveKit `1.5.7`, current Gemini `3.1` Live models do not support `generate_reply()`, so the worker automatically uses `GEMINI_PROACTIVE_REPLY_MODEL` for proactive greetings. Keep that set to a native-audio Gemini Live model such as `gemini-2.5-flash-native-audio-preview-12-2025`.
+Current Gemini `3.1` Live models have LiveKit compatibility limits around `generate_reply()` and mid-session updates, so avoid them on the production SIP path until the plugin support changes.
 
 ## Setup
 
@@ -111,7 +111,8 @@ python make_call.py --to +919876543210 --lead-context "Premium customer; last or
 ## Low-latency guardrails
 
 - Native Gemini Live audio-to-audio stays on the media path; no STT → LLM → TTS chain.
-- LiveKit turn handling is explicit: 400 ms Gemini activity silence, 350 ms endpointing floor, and barge-in enabled.
+- Gemini server-side turn detection owns endpointing: 200 ms Gemini activity silence, no extra LiveKit endpointing block, and VAD-driven barge-in enabled.
+- Preemptive speech generation includes preemptive TTS for the lowest perceived latency.
 - Room input audio frames are set to 20 ms.
 - System prompt warnings appear in the dashboard around 300 estimated tokens.
 - Structured latency metrics are written to `/tmp/voice-agent-metrics.jsonl` by default. Override with `VOICE_METRICS_LOG`.
@@ -140,7 +141,7 @@ python make_call.py --to +919876543210 --lead-context "Premium customer; last or
 
 - **`GEMINI_API_KEY missing`** — set `GEMINI_API_KEY` in `.env`. If both `GEMINI_API_KEY` and `GOOGLE_API_KEY` are exported in your shell, the app now removes the conflicting Google key inside the worker so Gemini Live uses the intended key.
 - **Worker logs an old Gemini model** — restart from this project folder or use `./start.sh`; `config.py` loads the project `.env` with override so stale terminal exports cannot pin an old model.
-- **`generate_reply is not compatible with 'gemini-3.1-flash-live-preview'`** — this is a LiveKit adapter limitation for proactive bot speech. Set `GEMINI_PROACTIVE_REPLY_MODEL=gemini-2.5-flash-native-audio-preview-12-2025`; the code uses it automatically for outbound greetings while staying on native Gemini Live audio.
+- **`generate_reply is not compatible with 'gemini-3.1-flash-live-preview'`** — this is a LiveKit adapter limitation for proactive bot speech. Keep `GEMINI_LIVE_MODEL=gemini-2.5-flash-native-audio-preview-12-2025` on production outbound calls.
 - **SIP 408 while dialing** — the agent creates the SIP participant without blocking on answer, keeps Gemini warm, and waits locally for the SIP participant to join before greeting.
 - **`SIP_TRUNK_ID not configured`** — run `python list_trunks.py`; if empty, run `python create_trunk.py`.
 - **Vobiz auth retries** — re-run `python setup_trunk.py` after rotating credentials.

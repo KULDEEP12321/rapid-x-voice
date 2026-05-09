@@ -425,7 +425,7 @@ async def entrypoint(ctx: agents.JobContext):
     except Exception:
         pass
 
-    # Room metadata (set by the Next.js dashboard) — wins over job metadata.
+    # Room metadata (set by the Python dashboard) wins over job metadata.
     try:
         if ctx.room.metadata:
             data = json.loads(ctx.room.metadata)

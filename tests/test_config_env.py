@@ -50,14 +50,14 @@ class DotenvPrecedenceTests(unittest.TestCase):
     def test_dotenv_model_overrides_stale_exported_shell_value(self):
         result = _run_config_probe(
             {"GEMINI_LIVE_MODEL": "gemini-2.5-flash-native-audio-preview-12-2025"},
-            "GEMINI_LIVE_MODEL=gemini-3.1-flash-live-preview\n",
+            "GEMINI_LIVE_MODEL=gemini-2.5-flash-native-audio-preview-12-2025\n",
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             json.loads(result.stdout),
             {
-                "model": "gemini-3.1-flash-live-preview",
+                "model": "gemini-2.5-flash-native-audio-preview-12-2025",
                 "key": None,
                 "google_key_present": False,
             },
@@ -76,7 +76,7 @@ class DotenvPrecedenceTests(unittest.TestCase):
         self.assertEqual(
             json.loads(result.stdout),
             {
-                "model": "gemini-3.1-flash-live-preview",
+                "model": "gemini-2.5-flash-native-audio-preview-12-2025",
                 "key": "correct-gemini-key",
                 "google_key_present": False,
             },

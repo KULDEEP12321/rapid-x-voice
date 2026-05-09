@@ -9,12 +9,11 @@ import config
 
 
 class LowLatencyConfigTests(unittest.TestCase):
-    def test_turn_handling_pins_fast_endpointing_and_barge_in(self):
+    def test_turn_handling_lets_gemini_own_endpointing(self):
         turn_handling = agent._build_turn_handling()
 
         self.assertEqual(turn_handling["turn_detection"], "realtime_llm")
-        self.assertLessEqual(turn_handling["endpointing"]["min_delay"], 0.25)
-        self.assertLessEqual(turn_handling["endpointing"]["max_delay"], 0.5)
+        self.assertNotIn("endpointing", turn_handling)
         self.assertTrue(turn_handling["interruption"]["enabled"])
         self.assertEqual(turn_handling["interruption"]["mode"], "vad")
         self.assertLessEqual(turn_handling["interruption"]["min_duration"], 0.08)
@@ -23,14 +22,16 @@ class LowLatencyConfigTests(unittest.TestCase):
             turn_handling["interruption"]["false_interruption_timeout"],
             0.6,
         )
+        self.assertTrue(turn_handling["preemptive_generation"]["enabled"])
+        self.assertTrue(turn_handling["preemptive_generation"]["preemptive_tts"])
 
     def test_gemini_activity_detection_interrupts_on_speech_start(self):
         realtime_config = agent._build_realtime_input_config()
         activity = realtime_config.automatic_activity_detection
 
         self.assertFalse(activity.disabled)
-        self.assertLessEqual(activity.prefix_padding_ms, 100)
-        self.assertEqual(activity.silence_duration_ms, 300)
+        self.assertEqual(activity.prefix_padding_ms, 20)
+        self.assertEqual(activity.silence_duration_ms, 200)
         self.assertEqual(
             realtime_config.activity_handling.value,
             "START_OF_ACTIVITY_INTERRUPTS",
@@ -49,49 +50,37 @@ class LowLatencyConfigTests(unittest.TestCase):
         self.assertNotIn("wait_until_answered=True", source)
         self.assertIn('"participant_connected"', source)
 
-    def test_outbound_greeting_uses_generate_reply_compatible_model(self):
+    def test_default_model_is_generate_reply_compatible(self):
+        self.assertEqual(
+            config.GEMINI_LIVE_MODEL,
+            "gemini-2.5-flash-native-audio-preview-12-2025",
+        )
+
+    def test_single_realtime_model_path_has_no_mid_call_agent_switch(self):
         original_model = config.GEMINI_LIVE_MODEL
-        original_fallback = config.GEMINI_PROACTIVE_REPLY_MODEL
         try:
-            config.GEMINI_LIVE_MODEL = "gemini-3.1-flash-live-preview"
-            config.GEMINI_PROACTIVE_REPLY_MODEL = (
-                "gemini-2.5-flash-native-audio-preview-12-2025"
-            )
-
-            self.assertEqual(
-                agent._select_realtime_model_name(requires_generate_reply=True),
-                "gemini-2.5-flash-native-audio-preview-12-2025",
-            )
-        finally:
-            config.GEMINI_LIVE_MODEL = original_model
-            config.GEMINI_PROACTIVE_REPLY_MODEL = original_fallback
-
-    def test_normal_turns_use_primary_realtime_model_after_greeting(self):
-        original_model = config.GEMINI_LIVE_MODEL
-        original_fallback = config.GEMINI_PROACTIVE_REPLY_MODEL
-        try:
-            config.GEMINI_LIVE_MODEL = "gemini-3.1-flash-live-preview"
-            config.GEMINI_PROACTIVE_REPLY_MODEL = (
-                "gemini-2.5-flash-native-audio-preview-12-2025"
-            )
-
-            self.assertEqual(
-                agent._select_realtime_model_name(requires_generate_reply=False),
-                "gemini-3.1-flash-live-preview",
-            )
+            config.GEMINI_LIVE_MODEL = "gemini-2.5-flash-native-audio-preview-12-2025"
 
             source = Path(agent.__file__).read_text(encoding="utf-8")
-            self.assertIn("session.update_agent(main_agent)", source)
-            self.assertIn('"realtime_model_switched"', source)
+            self.assertNotIn("_select_realtime_model_name", source)
+            self.assertNotIn("session.update_agent(main_agent)", source)
+            self.assertNotIn('"realtime_model_switched"', source)
+            self.assertNotIn("main_realtime", source)
+            self.assertNotIn("greeting_realtime", source)
         finally:
             config.GEMINI_LIVE_MODEL = original_model
-            config.GEMINI_PROACTIVE_REPLY_MODEL = original_fallback
 
     def test_outbound_assistant_can_pin_agent_level_realtime_model(self):
         marker_llm = object()
         assistant = agent.OutboundAssistant([], "Be brief.", llm=marker_llm)
 
         self.assertIs(assistant.llm, marker_llm)
+
+    def test_vad_is_prewarmed_at_module_import(self):
+        source = Path(agent.__file__).read_text(encoding="utf-8")
+
+        self.assertIn("_VAD = silero.VAD.load(", source)
+        self.assertIn("vad=_VAD", source)
 
     def test_session_instructions_always_append_low_latency_voice_rules(self):
         instructions = agent._build_session_instructions(
