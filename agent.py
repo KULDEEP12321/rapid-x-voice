@@ -1,9 +1,9 @@
 """
-Outbound voice agent powered by Gemini Live native audio + LiveKit + Twilio SIP.
+Outbound voice agent powered by LiveKit + SIP.
 
-A single Gemini Live `RealtimeModel` handles STT, reasoning and TTS in one
-streaming round-trip — there is no separate Deepgram / OpenAI / Cartesia
-pipeline anymore.
+The default stack remains Gemini Live native audio. For lower-latency Indian
+telephony, `VOICE_STACK=cascade` switches to a streaming Deepgram STT -> Groq
+LLM -> Sarvam TTS pipeline without adding request/response buffering.
 """
 
 import os
@@ -26,7 +26,8 @@ from google.genai import types as gtypes
 from livekit import agents, api, rtc
 from livekit.agents import Agent, AgentSession, NOT_GIVEN, RoomInputOptions, llm
 from livekit.agents.llm import ChatMessage
-from livekit.plugins import google, noise_cancellation, silero
+from livekit.plugins import deepgram, google, groq, noise_cancellation, sarvam, silero
+from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
 _LOG_LEVEL = os.getenv("LIVEKIT_LOG_LEVEL", "info").upper()
 logging.basicConfig(level=getattr(logging, _LOG_LEVEL, logging.INFO))
@@ -45,6 +46,12 @@ LOW_LATENCY_VOICE_RULES = (
     "Low-latency voice rules: reply in one short sentence. "
     "Ask one question at a time. Keep questions under 12 words."
 )
+CASCADE_STACK_ALIASES = {
+    "cascade",
+    "tier3",
+    "stt-llm-tts",
+    "deepgram-groq-sarvam",
+}
 
 PREFETCHED_CONTEXT_KEYS = (
     "lead_context",
@@ -148,6 +155,31 @@ def _build_turn_handling():
             "enabled": True,
             "preemptive_tts": True,
             "max_speech_duration": 8.0,
+        },
+    }
+
+
+def _build_cascade_turn_handling():
+    return {
+        "turn_detection": MultilingualModel(),
+        "endpointing": {
+            "mode": "dynamic",
+            "min_delay": config.CASCADE_MIN_ENDPOINTING_DELAY,
+            "max_delay": config.CASCADE_MAX_ENDPOINTING_DELAY,
+        },
+        "interruption": {
+            "enabled": True,
+            "mode": "adaptive",
+            "discard_audio_if_uninterruptible": True,
+            "min_duration": 0.06,
+            "min_words": 0,
+            "resume_false_interruption": False,
+            "false_interruption_timeout": 0.5,
+        },
+        "preemptive_generation": {
+            "enabled": True,
+            "preemptive_tts": True,
+            "max_speech_duration": 6.0,
         },
     }
 
@@ -371,13 +403,39 @@ class TransferFunctions(llm.ToolContext):
 # ---------------------------------------------------------------------------
 # Realtime model factory
 # ---------------------------------------------------------------------------
+def _coerce_float(value: Any, default: float) -> float:
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        logger.warning("invalid float value %r; using %.2f", value, default)
+        return default
+
+
+def _select_voice_stack(meta: dict | None = None) -> str:
+    requested = str((meta or {}).get("voice_stack") or config.VOICE_STACK).strip().lower()
+    if requested in CASCADE_STACK_ALIASES:
+        return "cascade"
+    if requested in {"gemini", "realtime", "native", "native-audio"}:
+        return "gemini"
+    logger.warning("unknown VOICE_STACK=%r; falling back to gemini", requested)
+    return "gemini"
+
+
+def _require_env(name: str, value: str | None):
+    if not value:
+        raise RuntimeError(f"{name} is missing. Set it in .env.")
+    return value
+
+
 def _build_realtime_model(voice: Optional[str] = None,
                           temperature: Optional[float] = None,
                           system_prompt: Optional[str] = None):
     """Create a Gemini Live realtime model. Voice / temperature / instructions
     can be overridden per-call via room metadata."""
     voice = voice or config.GEMINI_VOICE
-    temp = temperature if temperature is not None else config.GEMINI_TEMPERATURE
+    temp = _coerce_float(temperature, config.GEMINI_TEMPERATURE)
     model_name = config.GEMINI_LIVE_MODEL
 
     if not config.GEMINI_API_KEY:
@@ -400,6 +458,57 @@ def _build_realtime_model(voice: Optional[str] = None,
         input_audio_transcription=gtypes.AudioTranscriptionConfig(),
         output_audio_transcription=gtypes.AudioTranscriptionConfig(),
     )
+
+
+def _build_cascade_models(temperature: Optional[float] = None):
+    """Create streaming STT, LLM, and TTS providers for the Tier 3 path."""
+    deepgram_key = _require_env("DEEPGRAM_API_KEY", config.DEEPGRAM_API_KEY)
+    groq_key = _require_env("GROQ_API_KEY", config.GROQ_API_KEY)
+    sarvam_key = _require_env("SARVAM_API_KEY", config.SARVAM_API_KEY)
+    groq_temperature = _coerce_float(temperature, config.GROQ_TEMPERATURE)
+
+    logger.info(
+        "Cascade stack: stt=deepgram/%s:%s llm=groq/%s tts=sarvam/%s:%s speaker=%s",
+        config.DEEPGRAM_MODEL,
+        config.DEEPGRAM_LANGUAGE,
+        config.GROQ_MODEL,
+        config.SARVAM_TTS_MODEL,
+        config.SARVAM_LANGUAGE,
+        config.SARVAM_SPEAKER or "default",
+    )
+
+    return {
+        "stt": deepgram.STT(
+            model=config.DEEPGRAM_MODEL,
+            language=config.DEEPGRAM_LANGUAGE,
+            api_key=deepgram_key,
+            interim_results=True,
+            no_delay=True,
+            endpointing_ms=config.DEEPGRAM_ENDPOINTING_MS,
+            filler_words=False,
+            smart_format=False,
+        ),
+        "llm": groq.LLM(
+            model=config.GROQ_MODEL,
+            api_key=groq_key,
+            temperature=groq_temperature,
+            max_completion_tokens=config.GROQ_MAX_COMPLETION_TOKENS,
+            parallel_tool_calls=False,
+        ),
+        "tts": sarvam.TTS(
+            target_language_code=config.SARVAM_LANGUAGE,
+            model=config.SARVAM_TTS_MODEL,
+            speaker=config.SARVAM_SPEAKER or None,
+            speech_sample_rate=config.SARVAM_SAMPLE_RATE,
+            pace=config.SARVAM_PACE,
+            temperature=config.SARVAM_TEMPERATURE,
+            output_audio_bitrate=config.SARVAM_OUTPUT_AUDIO_BITRATE,
+            min_buffer_size=config.SARVAM_MIN_BUFFER_SIZE,
+            max_chunk_length=config.SARVAM_MAX_CHUNK_LENGTH,
+            enable_preprocessing=config.SARVAM_ENABLE_PREPROCESSING,
+            api_key=sarvam_key,
+        ),
+    }
 
 
 class OutboundAssistant(Agent):
@@ -439,35 +548,45 @@ async def entrypoint(ctx: agents.JobContext):
     call_started = time.perf_counter()
     instructions = _build_session_instructions(meta)
     lead_context = _prefetched_context_from_meta(meta)
+    voice_stack = _select_voice_stack(meta)
 
     _emit_metric(
         room_name,
         "call_started",
         phone_number=phone_number,
+        voice_stack=voice_stack,
         prompt_tokens_estimate=_approx_token_count(instructions),
         has_prefetched_context=bool(lead_context),
     )
 
     fnc_ctx = TransferFunctions(ctx, phone_number, lead_context=lead_context)
 
-    realtime = _build_realtime_model(
-        voice=meta.get("voice_id"),
-        temperature=meta.get("temperature"),
-        system_prompt=instructions,
-    )
-
-    session = AgentSession(
-        vad=_VAD,
-        turn_handling=_build_turn_handling(),
-        aec_warmup_duration=0.0,
-    )
-
     tools = list(fnc_ctx.function_tools.values())
-    agent = OutboundAssistant(
-        tools=tools,
-        instructions=instructions,
-        llm=realtime,
-    )
+    if voice_stack == "cascade":
+        session = AgentSession(
+            vad=_VAD,
+            turn_handling=_build_cascade_turn_handling(),
+            aec_warmup_duration=0.0,
+            max_tool_steps=2,
+            **_build_cascade_models(temperature=meta.get("temperature")),
+        )
+        agent = OutboundAssistant(tools=tools, instructions=instructions)
+    else:
+        realtime = _build_realtime_model(
+            voice=meta.get("voice_id"),
+            temperature=meta.get("temperature"),
+            system_prompt=instructions,
+        )
+        session = AgentSession(
+            vad=_VAD,
+            turn_handling=_build_turn_handling(),
+            aec_warmup_duration=0.0,
+        )
+        agent = OutboundAssistant(
+            tools=tools,
+            instructions=instructions,
+            llm=realtime,
+        )
 
     _emit_transcript(room_name, "system", f"Call started -> {phone_number or 'inbound'}")
 

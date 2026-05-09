@@ -61,9 +61,12 @@ def _gemini_api_key():
 
 
 # ---------------------------------------------------------------------------
-# 2. Realtime model (Gemini Live native audio)
-#    Single round-trip: STT + LLM + TTS handled by Gemini Live.
+# 2. Voice stack
+#    "gemini" keeps the native audio-to-audio path.
+#    "cascade" uses streaming STT -> Groq LLM -> Sarvam TTS for lower latency.
 # ---------------------------------------------------------------------------
+VOICE_STACK = os.getenv("VOICE_STACK", "gemini").strip().lower()
+
 GEMINI_API_KEY = _gemini_api_key()
 GEMINI_LIVE_MODEL = os.getenv(
     "GEMINI_LIVE_MODEL",
@@ -77,6 +80,38 @@ GEMINI_VOICES = [
     "Puck", "Charon", "Kore", "Fenrir", "Aoede",
     "Leda", "Orus", "Zephyr",
 ]
+
+
+# ---------------------------------------------------------------------------
+# 2b. Tier 3 cascade model settings
+# ---------------------------------------------------------------------------
+DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY")
+DEEPGRAM_MODEL = os.getenv("DEEPGRAM_MODEL", "nova-3")
+DEEPGRAM_LANGUAGE = os.getenv("DEEPGRAM_LANGUAGE", "multi")
+DEEPGRAM_ENDPOINTING_MS = int(os.getenv("DEEPGRAM_ENDPOINTING_MS", "25"))
+
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+GROQ_TEMPERATURE = float(os.getenv("GROQ_TEMPERATURE", "0.35"))
+GROQ_MAX_COMPLETION_TOKENS = int(os.getenv("GROQ_MAX_COMPLETION_TOKENS", "80"))
+
+SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
+SARVAM_TTS_MODEL = os.getenv("SARVAM_TTS_MODEL", "bulbul:v2")
+SARVAM_LANGUAGE = os.getenv("SARVAM_LANGUAGE", "en-IN")
+SARVAM_SPEAKER = os.getenv("SARVAM_SPEAKER", "anushka")
+SARVAM_SAMPLE_RATE = int(os.getenv("SARVAM_SAMPLE_RATE", "16000"))
+SARVAM_PACE = float(os.getenv("SARVAM_PACE", "1.08"))
+SARVAM_TEMPERATURE = float(os.getenv("SARVAM_TEMPERATURE", "0.6"))
+SARVAM_MIN_BUFFER_SIZE = int(os.getenv("SARVAM_MIN_BUFFER_SIZE", "30"))
+SARVAM_MAX_CHUNK_LENGTH = int(os.getenv("SARVAM_MAX_CHUNK_LENGTH", "80"))
+SARVAM_OUTPUT_AUDIO_BITRATE = os.getenv("SARVAM_OUTPUT_AUDIO_BITRATE", "64k")
+SARVAM_ENABLE_PREPROCESSING = (
+    os.getenv("SARVAM_ENABLE_PREPROCESSING", "true").strip().lower()
+    in {"1", "true", "yes", "on"}
+)
+
+CASCADE_MIN_ENDPOINTING_DELAY = float(os.getenv("CASCADE_MIN_ENDPOINTING_DELAY", "0.2"))
+CASCADE_MAX_ENDPOINTING_DELAY = float(os.getenv("CASCADE_MAX_ENDPOINTING_DELAY", "0.8"))
 
 
 # ---------------------------------------------------------------------------

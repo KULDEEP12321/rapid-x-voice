@@ -3,5 +3,9 @@ livekit-api>=1.1.0
 livekit-plugins-google>=1.5.7
 livekit-plugins-silero>=1.5.7
 livekit-plugins-noise-cancellation
+livekit-plugins-deepgram>=1.5.7
+livekit-plugins-groq>=1.5.7
+livekit-plugins-sarvam>=1.5.7
+livekit-plugins-turn-detector>=1.5.7
 python-dotenv>=1.0.0
 certifi>=2024.0.0

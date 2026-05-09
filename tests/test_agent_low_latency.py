@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import agent
 import config
@@ -23,6 +24,18 @@ class LowLatencyConfigTests(unittest.TestCase):
             0.6,
         )
         self.assertTrue(turn_handling["preemptive_generation"]["enabled"])
+        self.assertTrue(turn_handling["preemptive_generation"]["preemptive_tts"])
+
+    def test_cascade_turn_handling_uses_streaming_endpointing(self):
+        detector = object()
+        with patch.object(agent, "MultilingualModel", return_value=detector):
+            turn_handling = agent._build_cascade_turn_handling()
+
+        self.assertIn("endpointing", turn_handling)
+        self.assertIs(turn_handling["turn_detection"], detector)
+        self.assertLessEqual(turn_handling["endpointing"]["min_delay"], 0.25)
+        self.assertLessEqual(turn_handling["endpointing"]["max_delay"], 0.8)
+        self.assertEqual(turn_handling["interruption"]["mode"], "adaptive")
         self.assertTrue(turn_handling["preemptive_generation"]["preemptive_tts"])
 
     def test_gemini_activity_detection_interrupts_on_speech_start(self):
@@ -75,6 +88,60 @@ class LowLatencyConfigTests(unittest.TestCase):
         assistant = agent.OutboundAssistant([], "Be brief.", llm=marker_llm)
 
         self.assertIs(assistant.llm, marker_llm)
+
+    def test_voice_stack_selects_cascade_aliases(self):
+        self.assertEqual(agent._select_voice_stack({"voice_stack": "cascade"}), "cascade")
+        self.assertEqual(agent._select_voice_stack({"voice_stack": "tier3"}), "cascade")
+        self.assertEqual(agent._select_voice_stack({"voice_stack": "gemini"}), "gemini")
+
+    def test_build_cascade_models_wires_provider_settings(self):
+        originals = {
+            "DEEPGRAM_API_KEY": config.DEEPGRAM_API_KEY,
+            "GROQ_API_KEY": config.GROQ_API_KEY,
+            "SARVAM_API_KEY": config.SARVAM_API_KEY,
+            "DEEPGRAM_MODEL": config.DEEPGRAM_MODEL,
+            "DEEPGRAM_LANGUAGE": config.DEEPGRAM_LANGUAGE,
+            "GROQ_MODEL": config.GROQ_MODEL,
+            "SARVAM_TTS_MODEL": config.SARVAM_TTS_MODEL,
+            "SARVAM_LANGUAGE": config.SARVAM_LANGUAGE,
+        }
+        try:
+            config.DEEPGRAM_API_KEY = "dg-test"
+            config.GROQ_API_KEY = "groq-test"
+            config.SARVAM_API_KEY = "sarvam-test"
+            config.DEEPGRAM_MODEL = "nova-3"
+            config.DEEPGRAM_LANGUAGE = "multi"
+            config.GROQ_MODEL = "llama-3.3-70b-versatile"
+            config.SARVAM_TTS_MODEL = "bulbul:v2"
+            config.SARVAM_LANGUAGE = "en-IN"
+
+            with (
+                patch.object(agent.deepgram, "STT", return_value="stt") as stt,
+                patch.object(agent.groq, "LLM", return_value="llm") as llm,
+                patch.object(agent.sarvam, "TTS", return_value="tts") as tts,
+            ):
+                models = agent._build_cascade_models(temperature="0.2")
+        finally:
+            for key, value in originals.items():
+                setattr(config, key, value)
+
+        self.assertEqual(models, {"stt": "stt", "llm": "llm", "tts": "tts"})
+        self.assertEqual(stt.call_args.kwargs["model"], "nova-3")
+        self.assertEqual(stt.call_args.kwargs["language"], "multi")
+        self.assertTrue(stt.call_args.kwargs["no_delay"])
+        self.assertEqual(llm.call_args.kwargs["model"], "llama-3.3-70b-versatile")
+        self.assertEqual(llm.call_args.kwargs["temperature"], 0.2)
+        self.assertEqual(tts.call_args.kwargs["model"], "bulbul:v2")
+        self.assertEqual(tts.call_args.kwargs["target_language_code"], "en-IN")
+
+    def test_build_cascade_models_requires_provider_keys(self):
+        original = config.DEEPGRAM_API_KEY
+        try:
+            config.DEEPGRAM_API_KEY = ""
+            with self.assertRaisesRegex(RuntimeError, "DEEPGRAM_API_KEY"):
+                agent._build_cascade_models()
+        finally:
+            config.DEEPGRAM_API_KEY = original
 
     def test_vad_is_prewarmed_at_module_import(self):
         source = Path(agent.__file__).read_text(encoding="utf-8")

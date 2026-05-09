@@ -120,11 +120,11 @@ Same metrics-tail flow as Tier 1. The single number to watch is `caller_speech_e
 
 ---
 
-## 4. Tier 3 — cascade architecture (last resort)
+## 4. Tier 3 — cascade architecture
 
-Status: **not done.** This is the path when Tier 1 + Tier 2 still leave you above 1s and the business needs sub-800ms.
+Status: **enabled behind `VOICE_STACK=cascade`.** This is the path when Tier 1 + Tier 2 still leave you above 1s and the business needs sub-800ms.
 
-**Important: this violates [CLAUDE.md](CLAUDE.md) Rule 1** ("native audio-to-audio only"). Going this route is a *conscious architectural decision*, not a casual swap. CLAUDE.md needs to be amended in the same PR.
+**Important:** this is a conscious architectural decision, not a casual swap. [CLAUDE.md](CLAUDE.md) and [AGENTS.md](AGENTS.md) now allow a streaming cascade as an approved Tier 3 path, while still banning request/response buffering, disk audio handoffs, and serverless media hops.
 
 ### Why cascade can be faster than native audio (today)
 
@@ -152,9 +152,9 @@ LiveKit Agents has plugins for all of these, so the change is moderate, not deep
 |---|---|---|---|---|---|
 | **A — Deepgram + Groq + Cartesia** | Deepgram Nova-3 (multilingual) | Groq Llama 3.3 70B | Cartesia Sonic-Turbo | Hindi: good. Indian-English: excellent. | 0.9–1.4 |
 | **B — Sarvam end-to-end** | Sarvam Saarika v2 | Sarvam-M | Sarvam Bulbul v2 | Hindi/Indic: best in class | 1.2–1.8 |
-| **C — Mixed: Sarvam STT + Groq LLM + Cartesia TTS** | Sarvam Saarika | Groq Llama 3.3 70B | Cartesia Sonic | Hindi: very good. English: excellent. | 1.0–1.5 |
+| **C — Mixed: Deepgram + Groq + Sarvam** | Deepgram Nova-3 | Groq Llama 3.3 70B | Sarvam Bulbul v2/v3 | Hindi: very good. English: very good. | 1.0–1.6 |
 
-For an India-first sales/support bot, **Combo A** is the most reliable starting point — Deepgram and Cartesia have measured production telephony deployments in India, Groq has the lowest LLM TTFT in the industry. Combo B is the right pick if your callers are pure Hindi/Indic speakers without code-switching.
+For an India-first sales/support bot, **Combo A** is the most reliable starting point when Cartesia is available. This repo currently ships **Combo C** because the configured credentials include Deepgram, Groq, and Sarvam. Combo B is the right pick if your callers are pure Hindi/Indic speakers without code-switching.
 
 ### What changes in the code
 
@@ -162,14 +162,14 @@ The realtime model path goes away. `AgentSession` takes separate `stt`, `llm`, `
 
 ```python
 # instead of: AgentSession(vad=_VAD, turn_handling=...)
-from livekit.plugins import deepgram, groq, cartesia
+from livekit.plugins import deepgram, groq, sarvam
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
 session = AgentSession(
     vad=_VAD,
     stt=deepgram.STT(model="nova-3", language="multi"),  # auto Hindi/English
     llm=groq.LLM(model="llama-3.3-70b-versatile", temperature=0.7),
-    tts=cartesia.TTS(model="sonic-turbo", voice="<voice_id>"),
+    tts=sarvam.TTS(model="bulbul:v2", target_language_code="en-IN"),
     turn_detection=MultilingualModel(),  # Hindi-aware, ~50–160ms
     turn_handling={
         "interruption": {"enabled": True, "mode": "adaptive"},
@@ -180,10 +180,10 @@ session = AgentSession(
 
 Plus:
 
-- New requirements: `livekit-plugins-deepgram`, `livekit-plugins-groq`, `livekit-plugins-cartesia`, `livekit-plugins-turn-detector`.
-- New `.env` keys: `DEEPGRAM_API_KEY`, `GROQ_API_KEY`, `CARTESIA_API_KEY`.
-- Delete the entire `_build_realtime_model`, `_build_realtime_input_config` machinery.
-- Update CLAUDE.md Rule 1 to reflect the architectural change.
+- New requirements: `livekit-plugins-deepgram`, `livekit-plugins-groq`, `livekit-plugins-sarvam`, `livekit-plugins-turn-detector`.
+- New `.env` keys: `VOICE_STACK=cascade`, `DEEPGRAM_API_KEY`, `GROQ_API_KEY`, `SARVAM_API_KEY`.
+- Keep the Gemini realtime factory as a rollback path for `VOICE_STACK=gemini`.
+- Update CLAUDE.md and AGENTS.md Rule 1 to reflect the architectural change.
 - Pre-warm strategy: load all three plugin clients at module level, not inside `entrypoint()`.
 
 ### Tradeoffs vs. native audio

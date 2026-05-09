@@ -11,7 +11,9 @@ SIP trunk (Twilio / Vobiz / Plivo)
   ↓
 LiveKit media bridge  ← always-on, region-pinned, NOT serverless
   ↓
-Gemini Live WebSocket (native audio-to-audio)
+Voice stack selected by `VOICE_STACK`
+  ├─ `gemini`: Gemini Live WebSocket (native audio-to-audio)
+  └─ `cascade`: streaming STT → Groq LLM → streaming TTS
   ↓
 Same path back to caller
 ```
@@ -20,11 +22,11 @@ Do not introduce a step that buffers a full sentence, makes a synchronous round-
 
 ## Rules
 
-### 1. Native audio-to-audio only
-Use `livekit.plugins.google.realtime.RealtimeModel` end-to-end (current: `agent.py` ~line 147). **Do not** insert a separate STT → text-LLM → TTS pipeline. Stitched pipelines add 500–1500ms of latency on every turn. Only fall back to stitched if Gemini Live is genuinely down — and even then, treat it as a temporary failover, not a permanent path.
+### 1. Keep the selected stack streaming
+Default to `VOICE_STACK=gemini` with `livekit.plugins.google.realtime.RealtimeModel` for native audio-to-audio. For sub-second Indian telephony, `VOICE_STACK=cascade` is an approved Tier 3 path using streaming STT → Groq LLM → streaming TTS. **Do not** add request/response buffering, full-sentence waits, disk audio handoffs, or serverless hops to either path.
 
-### 2. Bridge stays close to caller + Gemini
-LiveKit worker runs in the region nearest both the SIP origin and Google's nearest Live API endpoint. For Indian callers: India West / Mumbai / Singapore. **Verify on every deploy** by checking the worker registration log line `region: India West`. If the region drifts (e.g. to `us-east-1`), fix it immediately — network distance is silent latency.
+### 2. Bridge stays close to caller + model vendors
+LiveKit worker runs in the region nearest both the SIP origin and model endpoints. For Indian callers: India West / Mumbai / Singapore. **Verify on every deploy** by checking the worker registration log line `region: India West`. If the region drifts (e.g. to `us-east-1`), fix it immediately — network distance is silent latency.
 
 ### 3. Stream tiny audio frames (~20ms)
 Don't add buffering, batching, or "stability" wrappers around the audio path. Every buffer is latency disguised as robustness. LiveKit and Gemini Live already chunk correctly — leave them alone.
@@ -69,7 +71,7 @@ The bridge / agent worker MUST run as a long-lived process. **No** Lambda / Clou
 | Caller speech end → first bot audio | **600–900ms** | session event timestamps in `agent.py` |
 | Caller interruption → bot stops speaking | **<200ms** | barge-in events |
 | Tool call duration | **<300ms** | wrap each tool in `time.perf_counter()` |
-| Roundtrip network time to Gemini | **<150ms** for India West | Live API client timing |
+| Roundtrip network time to active model provider | **<150ms** for India West | provider client timing |
 | Audio buffer depth | minimal | LiveKit metrics / debug logs |
 | Bridge processing | **<50ms** | agent.py event loop |
 
@@ -79,17 +81,17 @@ These are not aspirational — they are the bar. If a change pushes any of these
 
 | Rule | Status | Notes |
 |---|---|---|
-| 1. Native audio-to-audio | ✅ | `agent.py` uses Gemini Live realtime; no stitched pipeline |
+| 1. Streaming voice stack | ✅ | `VOICE_STACK=gemini` keeps native audio; `VOICE_STACK=cascade` uses streaming STT/LLM/TTS for Tier 3 |
 | 2. Region close to callers | ✅ | LiveKit worker registers in `India West` (verify on each deploy) |
 | 3. Tiny frames | ✅ | LiveKit/Gemini handle this; nothing custom buffering |
-| 4. Aggressive turn detection | ⚠️ **GAP** | `AgentSession` uses default endpointing — no explicit silence threshold or barge-in config. **Action:** add explicit turn-detection params next time we touch session setup |
+| 4. Aggressive turn detection | ✅ | Gemini uses realtime model VAD; cascade uses multilingual turn detection with fast endpointing |
 | 5. Compact prompts | ⚠️ **PARTIAL** | Dashboard exposes a free-form textarea — no length guard. **Action:** add a soft warning when prompt > 300 tokens |
 | 6. Fast tools / prefetch | ⚠️ **GAP** | `lookup_user` is a stub returning a hardcoded string. No prefetch path. **Action:** when CRM is wired up, load lead context into `meta` at dispatch time, not via mid-call tool call |
 | 7. Bot speaks less | ⚠️ **PROMPT-DEPENDENT** | The fallback `config.SYSTEM_PROMPT` says "1-2 sentences" but dashboard prompts may not. **Action:** add to dashboard placeholder/help text |
 | 8. Transcode once | ✅ | LiveKit owns the audio path; no file I/O |
 | 9. Warm sessions | ⚠️ **GAP** | `_build_realtime_model()` runs inside `entrypoint()` after dispatch, not before SIP answer. **Action:** see if we can lazy-init the websocket earlier in the LiveKit lifecycle |
 | 10. Always-on infra | ✅ | `start.sh` runs `nohup`, no serverless |
-| Metrics tracking | ❌ **MISSING** | No SLO measurement in code at all. **Action:** add `time.perf_counter()` wrappers around session events + tool calls; emit to a structured metrics log |
+| Metrics tracking | ✅ | Session events, tool calls, SDK metrics, and caller-stop → bot-audio timings are emitted to structured JSONL |
 
 When making changes, **fix gaps you touch**. Don't paper over them, don't add new gaps.
 
