@@ -165,6 +165,7 @@ class LowLatencyConfigTests(unittest.TestCase):
         self.assertEqual(llm.call_args.kwargs["model"], "sarvam-m")
         self.assertEqual(llm.call_args.kwargs["temperature"], 0.25)
         self.assertEqual(llm.call_args.kwargs["max_tokens"], 64)
+        self.assertIsNone(llm.call_args.kwargs["reasoning_effort"])
 
     def test_build_cascade_models_requires_provider_keys(self):
         original = config.DEEPGRAM_API_KEY

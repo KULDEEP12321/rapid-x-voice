@@ -482,6 +482,7 @@ def _build_cascade_models(temperature: Optional[float] = None):
             api_key=sarvam_key,
             temperature=_coerce_float(temperature, config.SARVAM_LLM_TEMPERATURE),
             max_tokens=config.SARVAM_LLM_MAX_TOKENS,
+            reasoning_effort=None,
         )
     elif llm_provider == "groq":
         groq_key = _require_env("GROQ_API_KEY", config.GROQ_API_KEY)
