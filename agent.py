@@ -463,19 +463,40 @@ def _build_realtime_model(voice: Optional[str] = None,
 def _build_cascade_models(temperature: Optional[float] = None):
     """Create streaming STT, LLM, and TTS providers for the Tier 3 path."""
     deepgram_key = _require_env("DEEPGRAM_API_KEY", config.DEEPGRAM_API_KEY)
-    groq_key = _require_env("GROQ_API_KEY", config.GROQ_API_KEY)
     sarvam_key = _require_env("SARVAM_API_KEY", config.SARVAM_API_KEY)
-    groq_temperature = _coerce_float(temperature, config.GROQ_TEMPERATURE)
+    llm_provider = config.CASCADE_LLM_PROVIDER
 
     logger.info(
-        "Cascade stack: stt=deepgram/%s:%s llm=groq/%s tts=sarvam/%s:%s speaker=%s",
+        "Cascade stack: stt=deepgram/%s:%s llm=%s tts=sarvam/%s:%s speaker=%s",
         config.DEEPGRAM_MODEL,
         config.DEEPGRAM_LANGUAGE,
-        config.GROQ_MODEL,
+        llm_provider,
         config.SARVAM_TTS_MODEL,
         config.SARVAM_LANGUAGE,
         config.SARVAM_SPEAKER or "default",
     )
+
+    if llm_provider == "sarvam":
+        llm_model = sarvam.LLM(
+            model=config.SARVAM_LLM_MODEL,
+            api_key=sarvam_key,
+            temperature=_coerce_float(temperature, config.SARVAM_LLM_TEMPERATURE),
+            max_tokens=config.SARVAM_LLM_MAX_TOKENS,
+        )
+    elif llm_provider == "groq":
+        groq_key = _require_env("GROQ_API_KEY", config.GROQ_API_KEY)
+        llm_model = groq.LLM(
+            model=config.GROQ_MODEL,
+            api_key=groq_key,
+            temperature=_coerce_float(temperature, config.GROQ_TEMPERATURE),
+            max_completion_tokens=config.GROQ_MAX_COMPLETION_TOKENS,
+            parallel_tool_calls=False,
+        )
+    else:
+        raise RuntimeError(
+            "CASCADE_LLM_PROVIDER must be either 'sarvam' or 'groq'. "
+            f"Got {llm_provider!r}."
+        )
 
     return {
         "stt": deepgram.STT(
@@ -488,13 +509,7 @@ def _build_cascade_models(temperature: Optional[float] = None):
             filler_words=False,
             smart_format=False,
         ),
-        "llm": groq.LLM(
-            model=config.GROQ_MODEL,
-            api_key=groq_key,
-            temperature=groq_temperature,
-            max_completion_tokens=config.GROQ_MAX_COMPLETION_TOKENS,
-            parallel_tool_calls=False,
-        ),
+        "llm": llm_model,
         "tts": sarvam.TTS(
             target_language_code=config.SARVAM_LANGUAGE,
             model=config.SARVAM_TTS_MODEL,

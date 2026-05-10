@@ -90,12 +90,17 @@ DEEPGRAM_MODEL = os.getenv("DEEPGRAM_MODEL", "nova-3")
 DEEPGRAM_LANGUAGE = os.getenv("DEEPGRAM_LANGUAGE", "multi")
 DEEPGRAM_ENDPOINTING_MS = int(os.getenv("DEEPGRAM_ENDPOINTING_MS", "25"))
 
+CASCADE_LLM_PROVIDER = os.getenv("CASCADE_LLM_PROVIDER", "sarvam").strip().lower()
+
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 GROQ_TEMPERATURE = float(os.getenv("GROQ_TEMPERATURE", "0.35"))
 GROQ_MAX_COMPLETION_TOKENS = int(os.getenv("GROQ_MAX_COMPLETION_TOKENS", "80"))
 
 SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
+SARVAM_LLM_MODEL = os.getenv("SARVAM_LLM_MODEL", "sarvam-30b")
+SARVAM_LLM_TEMPERATURE = float(os.getenv("SARVAM_LLM_TEMPERATURE", "0.35"))
+SARVAM_LLM_MAX_TOKENS = int(os.getenv("SARVAM_LLM_MAX_TOKENS", "80"))
 SARVAM_TTS_MODEL = os.getenv("SARVAM_TTS_MODEL", "bulbul:v2")
 SARVAM_LANGUAGE = os.getenv("SARVAM_LANGUAGE", "en-IN")
 SARVAM_SPEAKER = os.getenv("SARVAM_SPEAKER", "anushka")

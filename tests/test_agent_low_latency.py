@@ -96,6 +96,7 @@ class LowLatencyConfigTests(unittest.TestCase):
 
     def test_build_cascade_models_wires_provider_settings(self):
         originals = {
+            "CASCADE_LLM_PROVIDER": config.CASCADE_LLM_PROVIDER,
             "DEEPGRAM_API_KEY": config.DEEPGRAM_API_KEY,
             "GROQ_API_KEY": config.GROQ_API_KEY,
             "SARVAM_API_KEY": config.SARVAM_API_KEY,
@@ -106,6 +107,7 @@ class LowLatencyConfigTests(unittest.TestCase):
             "SARVAM_LANGUAGE": config.SARVAM_LANGUAGE,
         }
         try:
+            config.CASCADE_LLM_PROVIDER = "groq"
             config.DEEPGRAM_API_KEY = "dg-test"
             config.GROQ_API_KEY = "groq-test"
             config.SARVAM_API_KEY = "sarvam-test"
@@ -133,6 +135,36 @@ class LowLatencyConfigTests(unittest.TestCase):
         self.assertEqual(llm.call_args.kwargs["temperature"], 0.2)
         self.assertEqual(tts.call_args.kwargs["model"], "bulbul:v2")
         self.assertEqual(tts.call_args.kwargs["target_language_code"], "en-IN")
+
+    def test_build_cascade_models_can_use_sarvam_llm(self):
+        originals = {
+            "CASCADE_LLM_PROVIDER": config.CASCADE_LLM_PROVIDER,
+            "DEEPGRAM_API_KEY": config.DEEPGRAM_API_KEY,
+            "SARVAM_API_KEY": config.SARVAM_API_KEY,
+            "SARVAM_LLM_MODEL": config.SARVAM_LLM_MODEL,
+            "SARVAM_LLM_MAX_TOKENS": config.SARVAM_LLM_MAX_TOKENS,
+        }
+        try:
+            config.CASCADE_LLM_PROVIDER = "sarvam"
+            config.DEEPGRAM_API_KEY = "dg-test"
+            config.SARVAM_API_KEY = "sarvam-test"
+            config.SARVAM_LLM_MODEL = "sarvam-30b"
+            config.SARVAM_LLM_MAX_TOKENS = 64
+
+            with (
+                patch.object(agent.deepgram, "STT", return_value="stt"),
+                patch.object(agent.sarvam, "LLM", return_value="sarvam-llm") as llm,
+                patch.object(agent.sarvam, "TTS", return_value="tts"),
+            ):
+                models = agent._build_cascade_models(temperature="0.25")
+        finally:
+            for key, value in originals.items():
+                setattr(config, key, value)
+
+        self.assertEqual(models["llm"], "sarvam-llm")
+        self.assertEqual(llm.call_args.kwargs["model"], "sarvam-30b")
+        self.assertEqual(llm.call_args.kwargs["temperature"], 0.25)
+        self.assertEqual(llm.call_args.kwargs["max_tokens"], 64)
 
     def test_build_cascade_models_requires_provider_keys(self):
         original = config.DEEPGRAM_API_KEY
