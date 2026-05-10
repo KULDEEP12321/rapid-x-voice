@@ -6,8 +6,8 @@ set -Eeuo pipefail
 APP_DIR="${DEPLOY_REPO_DIR:-${DEPLOY_APP_DIR:-/opt/livekit-ai-voice}}"
 BRANCH="${DEPLOY_BRANCH:-main}"
 REMOTE="${DEPLOY_REMOTE:-origin}"
-WORKER_SERVICE="${DEPLOY_WORKER_SERVICE:-livekit-agent.service}"
-DASHBOARD_SERVICE="${DEPLOY_DASHBOARD_SERVICE:-livekit-dashboard.service}"
+WORKER_SERVICE="${DEPLOY_WORKER_SERVICE:-rapid-voice-agent.service}"
+DASHBOARD_SERVICE="${DEPLOY_DASHBOARD_SERVICE:-rapid-dashboard.service}"
 LOCK_FILE="${DEPLOY_LOCK_FILE:-/tmp/livekit-ai-voice-deploy.lock}"
 EXPECTED_LIVEKIT_REGION="${EXPECTED_LIVEKIT_REGION:-India West}"
 export EXPECTED_LIVEKIT_REGION
