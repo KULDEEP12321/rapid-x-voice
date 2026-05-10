@@ -89,6 +89,18 @@ class LowLatencyConfigTests(unittest.TestCase):
 
         self.assertIs(assistant.llm, marker_llm)
 
+    def test_sarvam_cascade_disables_tool_schemas(self):
+        original_provider = config.CASCADE_LLM_PROVIDER
+        try:
+            config.CASCADE_LLM_PROVIDER = "sarvam"
+            self.assertEqual(agent._agent_tools_for_stack("cascade", ["tool"]), [])
+
+            config.CASCADE_LLM_PROVIDER = "groq"
+            self.assertEqual(agent._agent_tools_for_stack("cascade", ["tool"]), ["tool"])
+            self.assertEqual(agent._agent_tools_for_stack("gemini", ["tool"]), ["tool"])
+        finally:
+            config.CASCADE_LLM_PROVIDER = original_provider
+
     def test_voice_stack_selects_cascade_aliases(self):
         self.assertEqual(agent._select_voice_stack({"voice_stack": "cascade"}), "cascade")
         self.assertEqual(agent._select_voice_stack({"voice_stack": "tier3"}), "cascade")

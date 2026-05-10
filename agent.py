@@ -139,6 +139,12 @@ def _build_session_instructions(meta: dict) -> str:
     return instructions
 
 
+def _agent_tools_for_stack(voice_stack: str, tools: list[llm.Tool]) -> list[llm.Tool]:
+    if voice_stack == "cascade" and config.CASCADE_LLM_PROVIDER == "sarvam":
+        return []
+    return tools
+
+
 def _build_turn_handling():
     return {
         "turn_detection": "realtime_llm",
@@ -578,6 +584,12 @@ async def entrypoint(ctx: agents.JobContext):
     fnc_ctx = TransferFunctions(ctx, phone_number, lead_context=lead_context)
 
     tools = list(fnc_ctx.function_tools.values())
+    agent_tools = _agent_tools_for_stack(voice_stack, tools)
+    if tools and not agent_tools:
+        logger.info(
+            "Disabling function tools for cascade provider %s; model does not support tool schemas.",
+            config.CASCADE_LLM_PROVIDER,
+        )
     if voice_stack == "cascade":
         session = AgentSession(
             vad=_VAD,
@@ -586,7 +598,7 @@ async def entrypoint(ctx: agents.JobContext):
             max_tool_steps=2,
             **_build_cascade_models(temperature=meta.get("temperature")),
         )
-        agent = OutboundAssistant(tools=tools, instructions=instructions)
+        agent = OutboundAssistant(tools=agent_tools, instructions=instructions)
     else:
         realtime = _build_realtime_model(
             voice=meta.get("voice_id"),
@@ -599,7 +611,7 @@ async def entrypoint(ctx: agents.JobContext):
             aec_warmup_duration=0.0,
         )
         agent = OutboundAssistant(
-            tools=tools,
+            tools=agent_tools,
             instructions=instructions,
             llm=realtime,
         )
