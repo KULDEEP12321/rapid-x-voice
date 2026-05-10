@@ -148,7 +148,7 @@ class LowLatencyConfigTests(unittest.TestCase):
             config.CASCADE_LLM_PROVIDER = "sarvam"
             config.DEEPGRAM_API_KEY = "dg-test"
             config.SARVAM_API_KEY = "sarvam-test"
-            config.SARVAM_LLM_MODEL = "sarvam-30b"
+            config.SARVAM_LLM_MODEL = "sarvam-m"
             config.SARVAM_LLM_MAX_TOKENS = 64
 
             with (
@@ -162,7 +162,7 @@ class LowLatencyConfigTests(unittest.TestCase):
                 setattr(config, key, value)
 
         self.assertEqual(models["llm"], "sarvam-llm")
-        self.assertEqual(llm.call_args.kwargs["model"], "sarvam-30b")
+        self.assertEqual(llm.call_args.kwargs["model"], "sarvam-m")
         self.assertEqual(llm.call_args.kwargs["temperature"], 0.25)
         self.assertEqual(llm.call_args.kwargs["max_tokens"], 64)
 
