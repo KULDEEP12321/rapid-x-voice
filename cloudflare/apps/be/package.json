@@ -1,0 +1,46 @@
+{
+  "name": "backend",
+  "version": "1.0.0",
+  "type": "module",
+  "author": "Hardik888",
+  "description": "boilerplate",
+  "scripts": {
+    "dev": "wrangler dev --persist-to=../../data --local --env=development",
+    "deploy": "wrangler deploy --minify",
+    "cf-typegen": "wrangler types --env-interface CloudflareBindings",
+    "setup-secrets": "node scripts/setup-secrets.js",
+    "test": "echo 'No tests specified yet'",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "wrangler d1 migrations apply app --local --persist-to=../../data --env=development",
+    "db:migrate:local": "wrangler d1 migrations apply app --local --persist-to=../../data --env=development",
+    "db:migrate:remote": "wrangler d1 migrations apply app --remote --env=production",
+    "db:push": "drizzle-kit push",
+    "db:studio": "drizzle-kit studio",
+    "db:drop": "drizzle-kit drop"
+  },
+  "exports": {
+    "./trpc": "./src/trpc/app.ts"
+  },
+  "dependencies": {
+    "@hono/trpc-server": "^0.4.0",
+    "@slack/bolt": "^4.4.0",
+    "@slack/web-api": "^7.10.0",
+    "@trpc/server": "^11.7.1",
+    "crypto-js": "^4.2.0",
+    "drizzle-orm": "^0.33.0",
+    "hono": "^4.9.6",
+    "kysely": "0.27.6",
+    "kysely-d1": "^0.3.0",
+    "superjson": "^2.2.5",
+    "zod": "^4.1.12"
+  },
+  "devDependencies": {
+    "@types/crypto-js": "^4.2.2",
+    "@types/node": "^24.3.1",
+    "dotenv-cli": "^7.4.2",
+    "drizzle-kit": "^0.24.2",
+    "i": "^0.3.7",
+    "kysely-codegen": "^0.16.8",
+    "wrangler": "^4.4.0"
+  }
+}

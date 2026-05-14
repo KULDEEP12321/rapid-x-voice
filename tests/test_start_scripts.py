@@ -24,6 +24,13 @@ class StartScriptTests(unittest.TestCase):
         self.assertNotIn("npm run dev", start)
         self.assertNotIn("next-server", status)
 
+    def test_removed_next_dashboard_has_no_stale_run_config(self):
+        self.assertFalse((PROJECT_ROOT / "dashboard").exists())
+        self.assertFalse((PROJECT_ROOT / ".codex" / "environments" / "environment.toml").exists())
+
+        agent = (PROJECT_ROOT / "agent.py").read_text(encoding="utf-8")
+        self.assertNotIn("Next.js dashboard", agent)
+
     def test_github_deploy_script_keeps_systemd_always_on_path(self):
         script = (PROJECT_ROOT / "scripts" / "deploy_from_github.sh").read_text(
             encoding="utf-8"

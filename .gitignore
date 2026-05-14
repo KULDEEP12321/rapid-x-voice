@@ -30,3 +30,6 @@ logs/
 # IDE settings
 .vscode/
 .idea/
+
+# Local Codex app environment metadata
+.codex/
