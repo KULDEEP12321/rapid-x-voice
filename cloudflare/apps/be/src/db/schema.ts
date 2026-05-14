@@ -14,8 +14,61 @@ const softDelete = {
     deletedAt: integer('deleted_at'),
 };
 
+export const user = sqliteTable('user', {
+    id: text('id').primaryKey(),
+    name: text('name').notNull(),
+    email: text('email').notNull().unique(),
+    emailVerified: integer('email_verified', { mode: 'boolean' }).notNull().default(false),
+    image: text('image'),
+    createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+    updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
+});
+
+export const session = sqliteTable('session', {
+    id: text('id').primaryKey(),
+    expiresAt: integer('expires_at', { mode: 'timestamp' }).notNull(),
+    token: text('token').notNull().unique(),
+    createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+    updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
+    ipAddress: text('ip_address'),
+    userAgent: text('user_agent'),
+    userId: text('user_id')
+        .notNull()
+        .references(() => user.id, { onDelete: 'cascade' }),
+});
+
+export const account = sqliteTable('account', {
+    id: text('id').primaryKey(),
+    accountId: text('account_id').notNull(),
+    providerId: text('provider_id').notNull(),
+    userId: text('user_id')
+        .notNull()
+        .references(() => user.id, { onDelete: 'cascade' }),
+    accessToken: text('access_token'),
+    refreshToken: text('refresh_token'),
+    idToken: text('id_token'),
+    accessTokenExpiresAt: integer('access_token_expires_at', { mode: 'timestamp' }),
+    refreshTokenExpiresAt: integer('refresh_token_expires_at', { mode: 'timestamp' }),
+    scope: text('scope'),
+    password: text('password'),
+    createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+    updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
+});
+
+export const verification = sqliteTable('verification', {
+    id: text('id').primaryKey(),
+    identifier: text('identifier').notNull(),
+    value: text('value').notNull(),
+    expiresAt: integer('expires_at', { mode: 'timestamp' }).notNull(),
+    createdAt: integer('created_at', { mode: 'timestamp' }),
+    updatedAt: integer('updated_at', { mode: 'timestamp' }),
+});
+
 export const organizations = sqliteTable('organizations', {
     id: integer('id').primaryKey({ autoIncrement: true }),
+    ownerUserId: text('owner_user_id').references(() => user.id, {
+        onDelete: 'set null',
+    }),
     name: text('name').notNull(),
     domain: text('domain'),
     industry: text('industry'),
@@ -39,19 +92,6 @@ export const templates = sqliteTable('templates', {
     campaignContextTemplate: text('campaign_context_template').notNull(),
     leadContextTemplate: text('lead_context_template').notNull(),
     isDefault: integer('is_default').notNull().default(0),
-    ...timestamps,
-    ...softDelete,
-});
-
-export const users = sqliteTable('users', {
-    id: integer('id').primaryKey({ autoIncrement: true }),
-    email: text('email').notNull().unique(),
-    name: text('name').notNull(),
-    role: text('role').notNull().default('owner'),
-    organizationId: integer('organization_id').references(() => organizations.id, {
-        onDelete: 'cascade',
-    }),
-    passwordHash: text('password_hash').notNull(),
     ...timestamps,
     ...softDelete,
 });
@@ -104,9 +144,7 @@ export const calls = sqliteTable('calls', {
     organizationId: integer('organization_id').references(() => organizations.id, {
         onDelete: 'set null',
     }),
-    userId: integer('user_id').references(() => users.id, {
-        onDelete: 'set null',
-    }),
+    userId: text('user_id').references(() => user.id, { onDelete: 'set null' }),
     fromNumber: text('from_number').notNull(),
     toNumber: text('to_number').notNull(),
     campaignId: integer('campaign_id').references(() => campaigns.id),
@@ -145,17 +183,6 @@ export const settings = sqliteTable('settings', {
         onDelete: 'cascade',
     }),
     value: text('value').notNull(),
-    ...timestamps,
-    ...softDelete,
-});
-
-export const sessions = sqliteTable('sessions', {
-    id: integer('id').primaryKey({ autoIncrement: true }),
-    userId: integer('user_id').notNull().references(() => users.id, {
-        onDelete: 'cascade',
-    }),
-    tokenHash: text('token_hash').notNull().unique(),
-    expiresAt: integer('expires_at').notNull(),
     ...timestamps,
     ...softDelete,
 });

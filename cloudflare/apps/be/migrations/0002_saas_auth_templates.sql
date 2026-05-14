@@ -28,26 +28,9 @@ CREATE TABLE IF NOT EXISTS templates (
   FOREIGN KEY (organization_id) REFERENCES organizations (id)
 );
 
-CREATE TABLE IF NOT EXISTS sessions (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  user_id INTEGER NOT NULL,
-  token_hash TEXT NOT NULL UNIQUE,
-  expires_at INTEGER NOT NULL,
-  created_at INTEGER NOT NULL DEFAULT (unixepoch()),
-  updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
-  deleted_at INTEGER,
-  FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
-);
-
 INSERT INTO organizations (name, domain, onboarding_completed, created_at, updated_at)
 SELECT 'Default Organization', 'example.com', 1, unixepoch(), unixepoch()
 WHERE NOT EXISTS (SELECT 1 FROM organizations);
-
-ALTER TABLE users ADD COLUMN organization_id INTEGER;
-UPDATE users
-SET organization_id = COALESCE(organization_id, (SELECT id FROM organizations ORDER BY id LIMIT 1));
-
-CREATE INDEX IF NOT EXISTS idx_users_organization_id ON users(organization_id);
 
 ALTER TABLE campaigns ADD COLUMN organization_id INTEGER;
 ALTER TABLE campaigns ADD COLUMN template_id INTEGER;
@@ -74,7 +57,7 @@ CREATE INDEX IF NOT EXISTS idx_leads_organization_id ON leads(organization_id);
 CREATE INDEX IF NOT EXISTS idx_leads_campaign_id ON leads(campaign_id);
 
 ALTER TABLE calls ADD COLUMN organization_id INTEGER;
-ALTER TABLE calls ADD COLUMN user_id INTEGER;
+ALTER TABLE calls ADD COLUMN user_id TEXT;
 ALTER TABLE calls ADD COLUMN duration_seconds INTEGER NOT NULL DEFAULT 0;
 UPDATE calls
 SET organization_id = COALESCE(organization_id, (SELECT id FROM organizations ORDER BY id LIMIT 1))
@@ -85,8 +68,6 @@ CREATE INDEX IF NOT EXISTS idx_calls_user_id ON calls(user_id);
 
 ALTER TABLE settings ADD COLUMN organization_id INTEGER;
 
-CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
-CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token_hash);
 CREATE INDEX IF NOT EXISTS idx_templates_organization_id ON templates(organization_id);
 CREATE INDEX IF NOT EXISTS idx_templates_is_default ON templates(is_default);
 

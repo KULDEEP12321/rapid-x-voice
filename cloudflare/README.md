@@ -28,6 +28,8 @@ Use this format locally:
 ```ini
 BASE_URL=http://localhost:4000
 FRONTEND_URL=http://localhost:3000
+BETTER_AUTH_URL=http://localhost:4000
+BETTER_AUTH_SECRET=<32-byte-dev-secret>
 PYTHON_DISPATCH_URL=https://call-agent.protechplanner.com/api/dispatch
 GROQ_BASE_URL=https://api.groq.com/openai/v1
 GROQ_MODEL=llama-3.3-70b-versatile
@@ -71,6 +73,7 @@ Remote migrations:
 
 Set production secrets with:
 
+- `pnpm --filter backend exec wrangler secret put BETTER_AUTH_SECRET --env=production`
 - `pnpm --filter backend exec wrangler secret put GROQ_API_KEY --env=production`
 - `pnpm --filter backend exec wrangler secret put DEEPGRAM_API_KEY --env=production` (if using Deepgram)
 - `pnpm --filter backend exec wrangler secret put SARVAM_API_KEY --env=production` (if using Sarvam)

@@ -15,7 +15,7 @@ const buildContext = async ({
     request?: Request;
 }) => {
   const appDB = new DatabaseService(env.DB);
-  const auth = await getAuthContext(appDB.db, request);
+  const auth = await getAuthContext(appDB.db, env, request);
   return {
     env,
     db: {

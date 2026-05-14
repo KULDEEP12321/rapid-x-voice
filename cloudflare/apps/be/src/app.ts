@@ -9,17 +9,9 @@ import {
     organizations,
     templates,
     transcripts,
-    users,
+    user as authUsers,
 } from './db/schema';
-import {
-    buildAuthCookie,
-    clearAuthCookieHeader,
-    extractSessionToken,
-    hashPassword,
-    issueSession,
-    removeSession,
-    verifyPassword,
-} from './auth';
+import { createAuth } from './auth';
 import { createApp } from './app.utils';
 import { createContext, createTrpcContext } from './context';
 import { appRouter } from './trpc/app';
@@ -43,6 +35,12 @@ app.use(async (c, next) => {
     const context = await createContext({ env: c.env, request: c.req.raw });
     c.set('context', context);
     await next();
+});
+
+app.on(['GET', 'POST'], '/api/auth/*', (c) => {
+    const context = c.get('context');
+    const auth = createAuth(context.db.appDB, c.env, c.req.raw);
+    return auth.handler(c.req.raw);
 });
 
 app.get('/api/health', (c) => c.json({ status: 'ok', service: 'rapid-x-api' }));
@@ -129,15 +127,34 @@ app.post('/auth/register', async (c) => {
         return payload.error;
     }
 
-    const existing = await context.db.appDB.select({ id: users.id }).from(users).where(eq(users.email, payload.value.email));
-    if (existing.length > 0) {
-        return c.json({ error: 'Email already registered' }, 409);
+    const auth = createAuth(context.db.appDB, c.env, c.req.raw);
+    const authResponse = await auth.api.signUpEmail({
+        body: {
+            email: payload.value.email,
+            password: payload.value.password,
+            name: payload.value.ownerName,
+        },
+        asResponse: true,
+    } as any) as Response;
+    const authBody = await readResponseJson(authResponse);
+
+    if (!authResponse.ok) {
+        return c.json(
+            { error: authErrorMessage(authBody, 'Unable to create account') },
+            authResponse.status as any,
+        );
+    }
+
+    const signedUpUser = extractAuthUser(authBody);
+    if (!signedUpUser?.id) {
+        return c.json({ error: 'Better Auth did not return a user id' }, 500);
     }
 
     const now = currentEpochSec();
     const [organization] = await context.db.appDB
         .insert(organizations)
         .values({
+            ownerUserId: signedUpUser.id,
             name: payload.value.companyName,
             domain: payload.value.domain,
             industry: payload.value.industry,
@@ -154,36 +171,15 @@ app.post('/auth/register', async (c) => {
         return c.json({ error: 'Unable to create organization' }, 500);
     }
 
-    const [user] = await context.db.appDB
-        .insert(users)
-        .values({
-            email: payload.value.email,
-            name: payload.value.ownerName,
-            organizationId: organization.id,
-            passwordHash: hashPassword(payload.value.password),
-            role: 'owner',
-            createdAt: now,
-            updatedAt: now,
-        })
-        .returning({ id: users.id, name: users.name, email: users.email });
-
-    if (!user) {
-        return c.json({ error: 'Unable to create account' }, 500);
-    }
-
     await seedOrganizationDefaults(context.db.appDB, organization.id);
-    const token = await issueSession(context.db.appDB, user.id);
-    return c.json(
+    return jsonWithAuthCookies(
+        c,
+        authResponse,
         {
             ok: true,
             organizationId: organization.id,
             trialSecondsAllocated: 1200,
             trialSecondsUsed: 0,
-        },
-        {
-            headers: {
-                'Set-Cookie': buildAuthCookie(token),
-            },
         },
     );
 });
@@ -195,37 +191,68 @@ app.post('/auth/login', async (c) => {
         return payload.error;
     }
 
+    const auth = createAuth(context.db.appDB, c.env, c.req.raw);
+    const authResponse = await auth.api.signInEmail({
+        body: {
+            email: payload.value.email,
+            password: payload.value.password,
+        },
+        headers: c.req.raw.headers,
+        asResponse: true,
+    } as any) as Response;
+    const authBody = await readResponseJson(authResponse);
+
+    if (!authResponse.ok) {
+        return c.json(
+            { error: authErrorMessage(authBody, 'Invalid credentials') },
+            authResponse.status as any,
+        );
+    }
+
+    let signedInUser = extractAuthUser(authBody);
+    if (!signedInUser?.id) {
+        const [fallbackUser] = await context.db.appDB
+            .select({
+                id: authUsers.id,
+                name: authUsers.name,
+                email: authUsers.email,
+            })
+            .from(authUsers)
+            .where(eq(authUsers.email, payload.value.email))
+            .limit(1);
+        signedInUser = fallbackUser;
+    }
+
+    if (!signedInUser?.id) {
+        return c.json({ error: 'Unable to resolve signed-in user' }, 500);
+    }
+
     const [userRow] = await context.db.appDB
         .select({
-            userId: users.id,
-            userName: users.name,
-            userEmail: users.email,
-            userPassword: users.passwordHash,
-            role: users.role,
             organizationId: organizations.id,
             organizationName: organizations.name,
             trialSecondsAllocated: organizations.trialSecondsAllocated,
             trialSecondsUsed: organizations.trialSecondsUsed,
             onboardingCompleted: organizations.onboardingCompleted,
         })
-        .from(users)
-        .innerJoin(organizations, eq(users.organizationId, organizations.id))
-        .where(eq(users.email, payload.value.email))
+        .from(organizations)
+        .where(eq(organizations.ownerUserId, signedInUser.id))
         .limit(1);
 
-    if (!userRow || !verifyPassword(payload.value.password, userRow.userPassword)) {
-        return c.json({ error: 'Invalid credentials' }, 401);
+    if (!userRow) {
+        return c.json({ error: 'No organization is linked to this user' }, 403);
     }
 
-    const token = await issueSession(context.db.appDB, userRow.userId);
-    return c.json(
+    return jsonWithAuthCookies(
+        c,
+        authResponse,
         {
             ok: true,
             user: {
-                id: userRow.userId,
-                name: userRow.userName,
-                email: userRow.userEmail,
-                role: userRow.role,
+                id: signedInUser.id,
+                name: signedInUser.name,
+                email: signedInUser.email,
+                role: 'owner',
                 organizationId: userRow.organizationId,
                 organizationName: userRow.organizationName,
             },
@@ -243,28 +270,17 @@ app.post('/auth/login', async (c) => {
                 ),
             },
         },
-        {
-            headers: {
-                'Set-Cookie': buildAuthCookie(token),
-            },
-        },
     );
 });
 
 app.post('/auth/logout', async (c) => {
     const context = c.get('context');
-    const rawToken = extractSessionToken(c.req.raw);
-    if (rawToken && context.db) {
-        await removeSession(context.db.appDB, rawToken);
-    }
-    return c.json(
-        { ok: true },
-        {
-            headers: {
-                'Set-Cookie': clearAuthCookieHeader(),
-            },
-        },
-    );
+    const auth = createAuth(context.db.appDB, c.env, c.req.raw);
+    const authResponse = await auth.api.signOut({
+        headers: c.req.raw.headers,
+        asResponse: true,
+    } as any) as Response;
+    return jsonWithAuthCookies(c, authResponse, { ok: true });
 });
 
 app.get('/auth/me', async (c) => {
@@ -617,7 +633,7 @@ const upsertCall = async (
     },
     now: number,
     organizationId: number | null,
-    userId: number | null,
+    userId: string | null,
 ) => {
     const existing = await db
         .select({ id: calls.id })
@@ -632,7 +648,7 @@ const upsertCall = async (
         status: string;
         updatedAt: number;
         organizationId?: number;
-        userId?: number;
+        userId?: string;
     } = {
         fromNumber: payload.fromNumber,
         toNumber: payload.toNumber,
@@ -751,6 +767,44 @@ const seedOrganizationDefaults = async (db: any, organizationId: number) => {
 };
 
 const currentEpochSec = () => Math.floor(Date.now() / 1000);
+
+const readResponseJson = async (response: Response) => {
+    try {
+        return await response.clone().json();
+    } catch {
+        return null;
+    }
+};
+
+const extractAuthUser = (value: any): { id: string; name: string; email: string } | null => {
+    const candidate = value?.user ?? value?.data?.user;
+    if (!candidate?.id) {
+        return null;
+    }
+    return {
+        id: String(candidate.id),
+        name: String(candidate.name ?? ''),
+        email: String(candidate.email ?? ''),
+    };
+};
+
+const authErrorMessage = (value: any, fallback: string) =>
+    value?.message ?? value?.error?.message ?? value?.error ?? fallback;
+
+const jsonWithAuthCookies = (c: any, authResponse: Response, body: unknown) => {
+    const headers = new Headers();
+    const getSetCookie = (authResponse.headers as any).getSetCookie;
+    const cookies =
+        typeof getSetCookie === 'function'
+            ? getSetCookie.call(authResponse.headers)
+            : [authResponse.headers.get('set-cookie')].filter(Boolean);
+
+    for (const cookie of cookies) {
+        headers.append('Set-Cookie', cookie);
+    }
+
+    return c.json(body, { headers });
+};
 
 const safeJson = async (
     c: any,
