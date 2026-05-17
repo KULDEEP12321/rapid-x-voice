@@ -18,16 +18,39 @@ import logging
 import math
 import time
 import wave
+from collections.abc import AsyncIterable
 from dataclasses import asdict, is_dataclass
 from typing import Any, Optional
 
 import config
 from google.genai import types as gtypes
 from livekit import agents, api, rtc
-from livekit.agents import Agent, AgentSession, NOT_GIVEN, RoomInputOptions, llm
+from livekit.agents import Agent, AgentSession, NOT_GIVEN, RoomInputOptions, StopResponse, llm
 from livekit.agents.llm import ChatMessage
-from livekit.plugins import deepgram, google, groq, noise_cancellation, sarvam, silero
+from livekit.agents.types import APIConnectOptions
+from livekit.agents.voice.agent import ModelSettings
+from livekit.agents.voice.agent_session import SessionConnectOptions
+from livekit.plugins import (
+    deepgram,
+    google,
+    groq,
+    noise_cancellation,
+    openai as openai_plugin,
+    sarvam,
+    silero,
+)
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
+from voice_runtime import (
+    ConversationRuntime,
+    ConversationState,
+    VoiceTimingConfig,
+    deterministic_reply_for_user_turn,
+    is_call_end_request,
+    is_connection_check,
+    is_human_transfer_request,
+    now_ms as runtime_now_ms,
+    voice_text_stream_transform,
+)
 
 _LOG_LEVEL = os.getenv("LIVEKIT_LOG_LEVEL", "info").upper()
 logging.basicConfig(level=getattr(logging, _LOG_LEVEL, logging.INFO))
@@ -43,8 +66,8 @@ METRICS_LOG = os.getenv("VOICE_METRICS_LOG", "/tmp/voice-agent-metrics.jsonl")
 RECORDINGS_DIR = os.getenv("VOICE_RECORDINGS_DIR", "/opt/livekit-ai-voice/recordings")
 PROMPT_TOKEN_TARGET = int(os.getenv("REALTIME_PROMPT_TOKEN_TARGET", "300"))
 LOW_LATENCY_VOICE_RULES = (
-    "Low-latency voice rules: reply in one short sentence. "
-    "Ask one question at a time. Keep questions under 12 words."
+    "Low-latency voice rules: one short reply, then one question. "
+    "Never say 'How can I assist you today?'"
 )
 CASCADE_STACK_ALIASES = {
     "cascade",
@@ -122,7 +145,11 @@ def _build_session_instructions(meta: dict) -> str:
     raw_lead_context = meta.get("lead_context")
     raw_lead_text = raw_lead_context.strip() if isinstance(raw_lead_context, str) else ""
 
-    sections = [base_prompt.strip(), LOW_LATENCY_VOICE_RULES]
+    sections = [
+        config.PHONE_AGENT_SYSTEM_LAYER.strip(),
+        base_prompt.strip(),
+        LOW_LATENCY_VOICE_RULES,
+    ]
     if user_prompt:
         sections.append(f"Campaign context:\n{user_prompt}")
     if lead_context and raw_lead_text != user_prompt:
@@ -145,6 +172,175 @@ def _agent_tools_for_stack(voice_stack: str, tools: list[llm.Tool]) -> list[llm.
     return tools
 
 
+def _is_llm_rate_limit_error(exc: BaseException) -> bool:
+    message = _exception_chain_text(exc)
+    return (
+        "429" in message
+        and (
+            "rate_limit" in message
+            or "rate limit" in message
+            or "tokens per day" in message
+            or "tpd" in message
+        )
+    )
+
+
+def _exception_chain_text(exc: BaseException) -> str:
+    parts: list[str] = []
+    current: BaseException | None = exc
+    while current is not None:
+        parts.append(str(current))
+        current = current.__cause__ or current.__context__
+    return "\n".join(parts).lower()
+
+
+def _is_sarvam_chat_order_error(exc: BaseException) -> bool:
+    message = _exception_chain_text(exc)
+    return (
+        "400" in message
+        and "user and assistant turns must alternate" in message
+    )
+
+
+def _build_voice_timing_config() -> VoiceTimingConfig:
+    return VoiceTimingConfig(
+        min_user_utterance_chars=config.MIN_USER_UTTERANCE_CHARS,
+        final_transcript_grace_ms=config.FINAL_TRANSCRIPT_GRACE_MS,
+        user_silence_commit_ms=config.USER_SILENCE_COMMIT_MS,
+        interruption_min_speech_ms=config.INTERRUPTION_MIN_SPEECH_MS,
+        interruption_min_chars=config.INTERRUPTION_MIN_CHARS,
+        interruption_confidence_threshold=config.INTERRUPTION_CONFIDENCE_THRESHOLD,
+        tts_cancel_debounce_ms=config.TTS_CANCEL_DEBOUNCE_MS,
+        max_recent_turns=config.MAX_RECENT_TURNS,
+    )
+
+
+def _prepend_memory_context(chat_ctx: llm.ChatContext, memory_text: str) -> None:
+    memory_text = memory_text.strip()
+    if not memory_text:
+        return
+    memory_message = ChatMessage(
+        role="system",
+        content=[
+            "Compact call memory for continuity. Use this only as context; "
+            "the caller's latest message has highest priority.\n"
+            f"{memory_text}"
+        ],
+    )
+    insert_at = 0
+    while (
+        insert_at < len(chat_ctx.items)
+        and isinstance(chat_ctx.items[insert_at], ChatMessage)
+        and chat_ctx.items[insert_at].role in {"system", "developer"}
+    ):
+        insert_at += 1
+    chat_ctx.items.insert(insert_at, memory_message)
+
+
+def _merge_message_text(message: ChatMessage, text: str) -> None:
+    existing = (message.text_content or "").strip()
+    message.content = [f"{existing}\n{text}".strip() if existing else text]
+
+
+def _sarvam_safe_chat_context(
+    chat_ctx: llm.ChatContext,
+    *,
+    system_instructions: str = "",
+    max_messages: int = 8,
+) -> llm.ChatContext:
+    """Return a Sarvam-compatible chat history: user-first and alternating."""
+    safe_ctx = llm.ChatContext.empty()
+    instruction_parts: list[str] = []
+
+    def _append_instruction(text: str) -> None:
+        text = text.strip()
+        if text and text not in instruction_parts:
+            instruction_parts.append(text)
+
+    _append_instruction(system_instructions)
+
+    for message in chat_ctx.messages():
+        role = message.role
+        if role in {"system", "developer"}:
+            _append_instruction(message.text_content or "")
+            continue
+        if role not in ("user", "assistant"):
+            continue
+
+        text = (message.text_content or "").strip()
+        if not text:
+            continue
+        if role == "assistant" and message.interrupted:
+            continue
+
+        messages = safe_ctx.messages()
+        if not messages and role != "user":
+            continue
+        if messages and messages[-1].role == role:
+            _merge_message_text(messages[-1], text)
+            continue
+
+        safe_ctx.add_message(
+            role=role,
+            content=text,
+            interrupted=False,
+            created_at=message.created_at,
+        )
+
+    while safe_ctx.messages() and safe_ctx.messages()[-1].role != "user":
+        safe_ctx.items.pop()
+
+    messages = safe_ctx.messages()
+    if len(messages) > max_messages:
+        messages = messages[-max_messages:]
+        if messages and messages[0].role != "user":
+            messages = messages[1:]
+        safe_ctx = llm.ChatContext(list(messages))
+
+    instruction_text = "\n".join(instruction_parts).strip()
+    if instruction_text and safe_ctx.messages():
+        first_message = safe_ctx.messages()[0]
+        if first_message.role == "user":
+            first_message.content = [
+                f"Instructions:\n{instruction_text}\n\nCaller: {first_message.text_content}"
+            ]
+
+    return safe_ctx
+
+
+def _role_signature(chat_ctx: llm.ChatContext) -> str:
+    return ",".join(message.role for message in chat_ctx.messages())
+
+
+def _replace_with_sarvam_safe_context(
+    chat_ctx: llm.ChatContext,
+    *,
+    system_instructions: str,
+    source: str,
+) -> None:
+    before_len = len(chat_ctx.items)
+    before_roles = _role_signature(chat_ctx)
+    safe_ctx = _sarvam_safe_chat_context(
+        chat_ctx,
+        system_instructions=system_instructions,
+    )
+    after_roles = _role_signature(safe_ctx)
+    if (
+        len(safe_ctx.items) != before_len
+        or after_roles != before_roles
+        or safe_ctx.items != chat_ctx.items
+    ):
+        logger.info(
+            "Sanitized Sarvam chat history at %s: %s -> %s items roles=%s -> %s",
+            source,
+            before_len,
+            len(safe_ctx.items),
+            before_roles,
+            after_roles,
+        )
+    chat_ctx.items = safe_ctx.items
+
+
 def _build_turn_handling():
     return {
         "turn_detection": "realtime_llm",
@@ -154,8 +350,8 @@ def _build_turn_handling():
             "discard_audio_if_uninterruptible": True,
             "min_duration": 0.06,
             "min_words": 0,
-            "resume_false_interruption": False,
-            "false_interruption_timeout": 0.5,
+            "resume_false_interruption": True,
+            "false_interruption_timeout": 1.0,
         },
         "preemptive_generation": {
             "enabled": True,
@@ -177,14 +373,14 @@ def _build_cascade_turn_handling():
             "enabled": True,
             "mode": "adaptive",
             "discard_audio_if_uninterruptible": True,
-            "min_duration": 0.06,
-            "min_words": 0,
-            "resume_false_interruption": False,
-            "false_interruption_timeout": 0.5,
+            "min_duration": config.INTERRUPTION_MIN_SPEECH_MS / 1000,
+            "min_words": 1,
+            "resume_false_interruption": True,
+            "false_interruption_timeout": 1.0,
         },
         "preemptive_generation": {
-            "enabled": True,
-            "preemptive_tts": True,
+            "enabled": False,
+            "preemptive_tts": False,
             "max_speech_duration": 6.0,
         },
     }
@@ -296,6 +492,27 @@ async def _record_track_to_wav(
         )
 
 
+async def _end_call_room(ctx: agents.JobContext, room_name: str, reason: str) -> None:
+    started = time.perf_counter()
+    try:
+        await ctx.api.room.delete_room(api.DeleteRoomRequest(room=room_name))
+        _emit_metric(
+            room_name,
+            "call_end_room_deleted",
+            reason=reason,
+            duration_ms=round((time.perf_counter() - started) * 1000, 2),
+        )
+    except Exception as e:
+        logger.warning("failed to end call room %s: %s", room_name, e)
+        _emit_metric(
+            room_name,
+            "call_end_room_delete_failed",
+            reason=reason,
+            duration_ms=round((time.perf_counter() - started) * 1000, 2),
+            error=str(e),
+        )
+
+
 # ---------------------------------------------------------------------------
 # Tools
 # ---------------------------------------------------------------------------
@@ -305,11 +522,13 @@ class TransferFunctions(llm.ToolContext):
         ctx: agents.JobContext,
         phone_number: Optional[str] = None,
         lead_context: str = "",
+        runtime: ConversationRuntime | None = None,
     ):
         super().__init__(tools=[])
         self.ctx = ctx
         self.phone_number = phone_number
         self.lead_context = lead_context.strip()
+        self.runtime = runtime
 
     def _lookup_user_details(self, phone: str) -> str:
         if self.lead_context:
@@ -336,10 +555,27 @@ class TransferFunctions(llm.ToolContext):
             )
 
     @llm.function_tool(
-        description="Transfer the call to a human or another phone number."
+        description=(
+            "ONLY transfer when the caller explicitly asks to speak to a human, "
+            "agent, operator, representative, or explicitly requests a transfer. "
+            "Do not call this for demo scheduling, 'proceed with demo', consent, "
+            "generic help, or abusive language."
+        )
     )
     async def transfer_call(self, destination: Optional[str] = None):
         started = time.perf_counter()
+        if not self._last_user_requested_transfer():
+            _emit_metric(
+                self.ctx.room.name,
+                "tool_call",
+                tool_name="transfer_call",
+                duration_ms=round((time.perf_counter() - started) * 1000, 2),
+                status="blocked_no_user_request",
+            )
+            return (
+                "The caller did not ask for a human transfer. Do not transfer. "
+                "Continue naturally: answer their latest question or confirm the demo next step."
+            )
         if destination is None:
             destination = config.DEFAULT_TRANSFER_NUMBER
             if not destination:
@@ -404,6 +640,14 @@ class TransferFunctions(llm.ToolContext):
                 error=str(e),
             )
             return f"Error executing transfer: {e}"
+
+    def _last_user_requested_transfer(self) -> bool:
+        if self.runtime is None:
+            return True
+        for turn in reversed(self.runtime.memory.recent_turns):
+            if turn.role == "user":
+                return is_human_transfer_request(turn.text)
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -492,50 +736,347 @@ def _build_cascade_models(temperature: Optional[float] = None):
         )
     elif llm_provider == "groq":
         groq_key = _require_env("GROQ_API_KEY", config.GROQ_API_KEY)
-        llm_model = groq.LLM(
-            model=config.GROQ_MODEL,
-            api_key=groq_key,
-            temperature=_coerce_float(temperature, config.GROQ_TEMPERATURE),
-            max_completion_tokens=config.GROQ_MAX_COMPLETION_TOKENS,
-            parallel_tool_calls=False,
-        )
+        groq_kwargs = {
+            "model": config.GROQ_MODEL,
+            "api_key": groq_key,
+            "base_url": config.GROQ_BASE_URL,
+            "temperature": _coerce_float(temperature, config.GROQ_TEMPERATURE),
+            "max_completion_tokens": config.GROQ_MAX_COMPLETION_TOKENS,
+            "parallel_tool_calls": False,
+            "timeout": config.GROQ_TIMEOUT_SECONDS,
+            "max_retries": config.GROQ_MAX_RETRIES,
+        }
+        if config.CLOUDFLARE_AI_GATEWAY_TOKEN:
+            llm_model = openai_plugin.LLM(
+                **groq_kwargs,
+                extra_headers={
+                    "cf-aig-authorization": (
+                        f"Bearer {config.CLOUDFLARE_AI_GATEWAY_TOKEN}"
+                    )
+                },
+            )
+        else:
+            llm_model = groq.LLM(**groq_kwargs)
     else:
         raise RuntimeError(
             "CASCADE_LLM_PROVIDER must be either 'sarvam' or 'groq'. "
             f"Got {llm_provider!r}."
         )
 
+    tts_model = sarvam.TTS(
+        target_language_code=config.SARVAM_LANGUAGE,
+        model=config.SARVAM_TTS_MODEL,
+        speaker=config.SARVAM_SPEAKER or None,
+        speech_sample_rate=config.SARVAM_SAMPLE_RATE,
+        pace=config.SARVAM_PACE,
+        temperature=config.SARVAM_TEMPERATURE,
+        output_audio_bitrate=config.SARVAM_OUTPUT_AUDIO_BITRATE,
+        min_buffer_size=config.SARVAM_MIN_BUFFER_SIZE,
+        max_chunk_length=config.SARVAM_MAX_CHUNK_LENGTH,
+        enable_preprocessing=config.SARVAM_ENABLE_PREPROCESSING,
+        api_key=sarvam_key,
+    )
+    if hasattr(tts_model, "prewarm"):
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            logger.debug("Skipping Sarvam TTS prewarm without a running event loop.")
+        else:
+            tts_model.prewarm()
+
     return {
         "stt": deepgram.STT(
             model=config.DEEPGRAM_MODEL,
             language=config.DEEPGRAM_LANGUAGE,
             api_key=deepgram_key,
-            interim_results=True,
+            interim_results=config.DEEPGRAM_INTERIM_RESULTS,
             no_delay=True,
             endpointing_ms=config.DEEPGRAM_ENDPOINTING_MS,
-            filler_words=False,
+            filler_words=config.DEEPGRAM_FILLER_WORDS,
             smart_format=False,
+            vad_events=config.DEEPGRAM_VAD_EVENTS,
         ),
         "llm": llm_model,
-        "tts": sarvam.TTS(
-            target_language_code=config.SARVAM_LANGUAGE,
-            model=config.SARVAM_TTS_MODEL,
-            speaker=config.SARVAM_SPEAKER or None,
-            speech_sample_rate=config.SARVAM_SAMPLE_RATE,
-            pace=config.SARVAM_PACE,
-            temperature=config.SARVAM_TEMPERATURE,
-            output_audio_bitrate=config.SARVAM_OUTPUT_AUDIO_BITRATE,
-            min_buffer_size=config.SARVAM_MIN_BUFFER_SIZE,
-            max_chunk_length=config.SARVAM_MAX_CHUNK_LENGTH,
-            enable_preprocessing=config.SARVAM_ENABLE_PREPROCESSING,
-            api_key=sarvam_key,
-        ),
+        "tts": tts_model,
     }
 
 
 class OutboundAssistant(Agent):
-    def __init__(self, tools: list, instructions: str, llm: Any = NOT_GIVEN) -> None:
+    def __init__(
+        self,
+        tools: list,
+        instructions: str,
+        llm: Any = NOT_GIVEN,
+        *,
+        sanitize_chat_history: bool = False,
+        runtime: ConversationRuntime | None = None,
+    ) -> None:
+        self._sanitize_chat_history = sanitize_chat_history
+        self._runtime = runtime
+        self._runtime_instructions = instructions.strip()
         super().__init__(instructions=instructions, tools=tools, llm=llm)
+
+    def stt_node(
+        self,
+        audio: AsyncIterable[rtc.AudioFrame],
+        model_settings: ModelSettings,
+    ):
+        async def _filtered_stt_events():
+            node = Agent.stt_node(self, audio, model_settings)
+            if asyncio.iscoroutine(node):
+                node = await node
+            if not isinstance(node, AsyncIterable):
+                return
+
+            async for ev in node:
+                if self._runtime is None:
+                    yield ev
+                    continue
+                filtered = self._runtime.filter_stt_event(
+                    ev,
+                    assistant_speaking=(
+                        self._runtime.state == ConversationState.ASSISTANT_SPEAKING
+                    ),
+                    now_ms=runtime_now_ms(),
+                )
+                if filtered is not None:
+                    yield filtered
+
+        return _filtered_stt_events()
+
+    def llm_node(
+        self,
+        chat_ctx: llm.ChatContext,
+        tools: list[llm.Tool],
+        model_settings: ModelSettings,
+    ):
+        async def _guarded_llm_stream():
+            assistant_turn_id = (
+                self._runtime.start_assistant_turn(now_ms=runtime_now_ms())
+                if self._runtime
+                else None
+            )
+            started = time.perf_counter()
+            first_token_seen = False
+            response_parts: list[str] = []
+            saw_tool_call = False
+
+            deterministic_reply = self._deterministic_reply_for_latest_user_turn()
+            if deterministic_reply:
+                if self._runtime:
+                    self._runtime.emit(
+                        "deterministic_reply",
+                        responseText=deterministic_reply,
+                    )
+                yield deterministic_reply
+                return
+
+            node = None
+            try:
+                if self._sanitize_chat_history:
+                    _replace_with_sarvam_safe_context(
+                        chat_ctx,
+                        system_instructions=self._runtime_instructions,
+                        source="llm_node",
+                    )
+
+                node = Agent.llm_node(self, chat_ctx, tools, model_settings)
+                if asyncio.iscoroutine(node):
+                    node = await node
+
+                if isinstance(node, str):
+                    if self._runtime and not self._runtime.is_active_assistant_turn(
+                        assistant_turn_id
+                    ):
+                        self._runtime.emit(
+                            "stale_response_discarded",
+                            staleAssistantTurnId=assistant_turn_id,
+                        )
+                        return
+                    response_parts.append(node)
+                    yield node
+                    return
+
+                if not isinstance(node, AsyncIterable):
+                    return
+
+                async for chunk in node:
+                    if self._runtime and not self._runtime.is_active_assistant_turn(
+                        assistant_turn_id
+                    ):
+                        self._runtime.emit(
+                            "stale_response_discarded",
+                            staleAssistantTurnId=assistant_turn_id,
+                        )
+                        return
+                    if self._runtime and not first_token_seen:
+                        first_token_seen = True
+                        self._runtime.emit(
+                            "groq_first_token",
+                            latencyMs=round((time.perf_counter() - started) * 1000, 2),
+                        )
+
+                    if isinstance(chunk, str):
+                        response_parts.append(chunk)
+                    else:
+                        delta = getattr(chunk, "delta", None)
+                        content = getattr(delta, "content", None) if delta else None
+                        tool_calls = getattr(delta, "tool_calls", None) if delta else None
+                        if tool_calls:
+                            saw_tool_call = True
+                        if content:
+                            response_parts.append(content)
+                    yield chunk
+
+                if (
+                    self._runtime
+                    and not saw_tool_call
+                    and not "".join(response_parts).strip()
+                    and self._runtime.is_active_assistant_turn(assistant_turn_id)
+                ):
+                    fallback = config.EMPTY_ASSISTANT_FALLBACK
+                    self._runtime.emit(
+                        "empty_assistant_response_fallback",
+                        responseText=fallback,
+                    )
+                    response_parts.append(fallback)
+                    yield fallback
+            except Exception as exc:
+                if _is_llm_rate_limit_error(exc):
+                    fallback = config.LLM_RATE_LIMIT_FALLBACK
+                    event_type = "llm_rate_limit_fallback"
+                elif _is_sarvam_chat_order_error(exc):
+                    fallback = config.LLM_TEMPORARY_ERROR_FALLBACK
+                    event_type = "llm_chat_order_fallback"
+                else:
+                    raise
+                if self._runtime:
+                    self._runtime.emit(
+                        event_type,
+                        error=str(exc),
+                        responseText=fallback,
+                    )
+                response_parts.append(fallback)
+                yield fallback
+            finally:
+                if self._runtime:
+                    self._runtime.emit(
+                        "groq_request_finished",
+                        latencyMs=round((time.perf_counter() - started) * 1000, 2),
+                        responseText="".join(response_parts).strip(),
+                    )
+                if node is not None and hasattr(node, "aclose"):
+                    await node.aclose()
+
+        return _guarded_llm_stream()
+
+    def _deterministic_reply_for_latest_user_turn(self) -> str | None:
+        if self._runtime is None:
+            return None
+        user_turns = [
+            turn for turn in self._runtime.memory.recent_turns if turn.role == "user"
+        ]
+        connection_only_opening = bool(user_turns) and all(
+            is_connection_check(turn.text) for turn in user_turns
+        )
+        for turn in reversed(self._runtime.memory.recent_turns):
+            if turn.role == "user":
+                if is_call_end_request(turn.text):
+                    self._runtime.request_call_end("caller_declined")
+                return deterministic_reply_for_user_turn(
+                    turn.text,
+                    instructions=(
+                        self._runtime_instructions if connection_only_opening else ""
+                    ),
+                )
+        return None
+
+    def tts_node(
+        self,
+        text: AsyncIterable[str],
+        model_settings: ModelSettings,
+    ):
+        async def _guarded_tts_stream():
+            assistant_turn_id = (
+                self._runtime.active_assistant_turn_id if self._runtime else None
+            )
+            started = time.perf_counter()
+            first_audio_seen = False
+            node = Agent.tts_node(self, text, model_settings)
+            if asyncio.iscoroutine(node):
+                node = await node
+            if not isinstance(node, AsyncIterable):
+                return
+
+            try:
+                async for frame in node:
+                    if (
+                        self._runtime
+                        and assistant_turn_id is not None
+                        and not self._runtime.is_active_assistant_turn(assistant_turn_id)
+                    ):
+                        self._runtime.emit(
+                            "stale_tts_audio_discarded",
+                            staleAssistantTurnId=assistant_turn_id,
+                        )
+                        return
+                    if self._runtime and not first_audio_seen:
+                        first_audio_seen = True
+                        self._runtime.mark_assistant_speaking()
+                        total_latency_ms = None
+                        if self._runtime.last_user_commit_at_ms is not None:
+                            total_latency_ms = (
+                                runtime_now_ms() - self._runtime.last_user_commit_at_ms
+                            )
+                        self._runtime.emit(
+                            "tts_first_audio",
+                            latencyMs=round((time.perf_counter() - started) * 1000, 2),
+                            userFinalToAssistantAudioLatencyMs=total_latency_ms,
+                        )
+                    yield frame
+            finally:
+                if hasattr(node, "aclose"):
+                    await node.aclose()
+
+        return _guarded_tts_stream()
+
+    async def on_user_turn_completed(
+        self,
+        turn_ctx: llm.ChatContext,
+        new_message: ChatMessage,
+    ) -> None:
+        memory_fragment = self._runtime.memory.prompt_fragment() if self._runtime else ""
+        if self._runtime:
+            committed = self._runtime.commit_livekit_user_turn(
+                new_message.text_content or "",
+                confidence=new_message.transcript_confidence,
+                now_ms=runtime_now_ms(),
+            )
+            if not committed:
+                raise StopResponse()
+            new_message.content = [committed]
+            _prepend_memory_context(turn_ctx, memory_fragment)
+            turn_ctx.truncate(max_items=config.MAX_RECENT_TURNS + 4)
+
+        if not self._sanitize_chat_history:
+            return
+
+        before_len = len(turn_ctx.items)
+        before_roles = _role_signature(turn_ctx)
+        _replace_with_sarvam_safe_context(
+            turn_ctx,
+            system_instructions=self._runtime_instructions,
+            source="turn_completed",
+        )
+        if self._runtime:
+            self._runtime.emit(
+                "sarvam_chat_sanitized",
+                source="turn_completed",
+                originalItems=before_len,
+                sanitizedItems=len(turn_ctx.items),
+                originalRoles=before_roles,
+                sanitizedRoles=_role_signature(turn_ctx),
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -572,6 +1113,15 @@ async def entrypoint(ctx: agents.JobContext):
     lead_context = _prefetched_context_from_meta(meta)
     voice_stack = _select_voice_stack(meta)
 
+    def _emit_runtime_event(event_type: str, payload: dict[str, Any]) -> None:
+        _emit_metric(room_name, "voice_runtime", **payload)
+
+    runtime = ConversationRuntime(
+        room_name,
+        _build_voice_timing_config(),
+        log_event=_emit_runtime_event,
+    )
+
     _emit_metric(
         room_name,
         "call_started",
@@ -581,7 +1131,12 @@ async def entrypoint(ctx: agents.JobContext):
         has_prefetched_context=bool(lead_context),
     )
 
-    fnc_ctx = TransferFunctions(ctx, phone_number, lead_context=lead_context)
+    fnc_ctx = TransferFunctions(
+        ctx,
+        phone_number,
+        lead_context=lead_context,
+        runtime=runtime,
+    )
 
     tools = list(fnc_ctx.function_tools.values())
     agent_tools = _agent_tools_for_stack(voice_stack, tools)
@@ -595,10 +1150,27 @@ async def entrypoint(ctx: agents.JobContext):
             vad=_VAD,
             turn_handling=_build_cascade_turn_handling(),
             aec_warmup_duration=0.0,
+            session_close_transcript_timeout=config.USER_SILENCE_COMMIT_MS / 1000,
+            conn_options=SessionConnectOptions(
+                llm_conn_options=APIConnectOptions(
+                    max_retry=config.CASCADE_LLM_MAX_RETRIES,
+                    timeout=config.GROQ_TIMEOUT_SECONDS,
+                ),
+            ),
+            tts_text_transforms=[
+                "filter_markdown",
+                "filter_emoji",
+                voice_text_stream_transform,
+            ],
             max_tool_steps=2,
             **_build_cascade_models(temperature=meta.get("temperature")),
         )
-        agent = OutboundAssistant(tools=agent_tools, instructions=instructions)
+        agent = OutboundAssistant(
+            tools=agent_tools,
+            instructions=instructions,
+            sanitize_chat_history=config.CASCADE_LLM_PROVIDER == "sarvam",
+            runtime=runtime,
+        )
     else:
         realtime = _build_realtime_model(
             voice=meta.get("voice_id"),
@@ -614,6 +1186,7 @@ async def entrypoint(ctx: agents.JobContext):
             tools=agent_tools,
             instructions=instructions,
             llm=realtime,
+            runtime=runtime,
         )
 
     _emit_transcript(room_name, "system", f"Call started -> {phone_number or 'inbound'}")
@@ -622,44 +1195,115 @@ async def entrypoint(ctx: agents.JobContext):
     interruption_started: float | None = None
     agent_state = "initializing"
     user_state = "listening"
+    barge_in_task: asyncio.Task | None = None
+    call_end_task: asyncio.Task | None = None
+
+    async def _end_call_after_farewell(reason: str) -> None:
+        await asyncio.sleep(config.CALL_END_AFTER_AUDIO_DELAY_SECONDS)
+        await _end_call_room(ctx, room_name, reason)
+
+    def _schedule_call_end_after_farewell(reason: str) -> None:
+        nonlocal call_end_task
+        if call_end_task and not call_end_task.done():
+            return
+        runtime.emit("call_end_scheduled", reason=reason)
+        call_end_task = asyncio.create_task(_end_call_after_farewell(reason))
+
+    async def _maybe_interrupt_after_debounce(turn_id: int, started_at_ms: int) -> None:
+        await asyncio.sleep(config.INTERRUPTION_MIN_SPEECH_MS / 1000)
+        if turn_id != runtime.user_turn_id:
+            return
+        if user_state != "speaking" or agent_state != "speaking":
+            return
+        decision = runtime.barge_in.evaluate(
+            assistant_speaking=True,
+            user_speech_started_at_ms=started_at_ms,
+            now_ms=runtime_now_ms(),
+            transcript=runtime.last_partial_transcript,
+            confidence=runtime.last_partial_confidence,
+        )
+        runtime.emit(
+            "interruption_evaluated",
+            interruptionDetected=decision.should_interrupt,
+            interruptionReason=decision.reason,
+            partialTranscript=runtime.last_partial_transcript,
+        )
+        if not decision.should_interrupt:
+            return
+
+        nonlocal_interruption_started = time.perf_counter()
+        runtime.cancel_assistant_turn(
+            now_ms=runtime_now_ms(),
+            reason=decision.reason,
+        )
+        _emit_metric(
+            room_name,
+            "caller_interruption_started",
+            reason=decision.reason,
+            debounced_ms=config.INTERRUPTION_MIN_SPEECH_MS,
+        )
+        try:
+            interrupt_future = session.interrupt(force=True)
+            _emit_metric(room_name, "agent_interrupt_requested", force=True)
+
+            def _log_interrupt_result(future):
+                nonlocal interruption_started
+                interruption_started = nonlocal_interruption_started
+                try:
+                    error = future.exception()
+                except asyncio.CancelledError:
+                    return
+                if error:
+                    logger.warning("forced interrupt failed: %s", error)
+                    runtime.emit(
+                        "tts_cancel_failed",
+                        interruptionReason=decision.reason,
+                        error=str(error),
+                    )
+                    _emit_metric(room_name, "agent_interrupt_failed", error=str(error))
+
+            interrupt_future.add_done_callback(_log_interrupt_result)
+        except Exception as e:
+            logger.warning("forced interrupt request failed: %s", e)
+            runtime.emit(
+                "tts_cancel_failed",
+                interruptionReason=decision.reason,
+                error=str(e),
+            )
+            _emit_metric(room_name, "agent_interrupt_failed", error=str(e))
 
     @session.on("user_state_changed")
     def _on_user_state(ev):
-        nonlocal last_user_speech_end, interruption_started, user_state
+        nonlocal last_user_speech_end, user_state, barge_in_task
         previous = user_state
         user_state = getattr(ev, "new_state", user_state)
+        now = time.perf_counter()
+        event_now_ms = runtime_now_ms()
         _emit_metric(
             room_name,
             "user_state_changed",
             old_state=getattr(ev, "old_state", previous),
             new_state=user_state,
         )
+        try:
+            if user_state == "speaking":
+                runtime.on_user_speech_started(now_ms=event_now_ms)
+            elif previous == "speaking":
+                runtime.on_user_speech_ended(now_ms=event_now_ms)
+        except ValueError as e:
+            logger.warning("voice state transition failed: %s", e)
+            runtime.emit("state_transition_error", error=str(e))
+
         if user_state == "speaking" and agent_state == "speaking":
-            interruption_started = time.perf_counter()
-            _emit_metric(room_name, "caller_interruption_started")
-            try:
-                interrupt_future = session.interrupt(force=True)
-                _emit_metric(room_name, "agent_interrupt_requested", force=True)
-
-                def _log_interrupt_result(future):
-                    try:
-                        error = future.exception()
-                    except asyncio.CancelledError:
-                        return
-                    if error:
-                        logger.warning("forced interrupt failed: %s", error)
-                        _emit_metric(
-                            room_name,
-                            "agent_interrupt_failed",
-                            error=str(error),
-                        )
-
-                interrupt_future.add_done_callback(_log_interrupt_result)
-            except Exception as e:
-                logger.warning("forced interrupt request failed: %s", e)
-                _emit_metric(room_name, "agent_interrupt_failed", error=str(e))
+            if barge_in_task and not barge_in_task.done():
+                barge_in_task.cancel()
+            barge_in_task = asyncio.create_task(
+                _maybe_interrupt_after_debounce(runtime.user_turn_id, event_now_ms)
+            )
         if previous == "speaking" and user_state != "speaking":
-            last_user_speech_end = time.perf_counter()
+            if barge_in_task and not barge_in_task.done():
+                barge_in_task.cancel()
+            last_user_speech_end = now
             _emit_metric(room_name, "caller_speech_ended")
 
     @session.on("agent_state_changed")
@@ -674,6 +1318,26 @@ async def entrypoint(ctx: agents.JobContext):
             old_state=getattr(ev, "old_state", previous),
             new_state=agent_state,
         )
+        try:
+            if agent_state == "thinking":
+                if runtime.state in {
+                    ConversationState.IDLE,
+                    ConversationState.USER_PAUSED,
+                    ConversationState.INTERRUPTED,
+                }:
+                    runtime.transition(ConversationState.THINKING, event_type="agent_thinking")
+                else:
+                    runtime.emit("agent_thinking")
+            elif agent_state == "speaking":
+                runtime.mark_assistant_speaking()
+            elif previous == "speaking" and agent_state != "speaking":
+                runtime.emit("assistant_audio_stopped")
+                call_end_reason = runtime.consume_call_end_request()
+                if call_end_reason:
+                    _schedule_call_end_after_farewell(call_end_reason)
+        except ValueError as e:
+            logger.warning("voice state transition failed: %s", e)
+            runtime.emit("state_transition_error", error=str(e))
         if agent_state == "speaking" and last_user_speech_end is not None:
             _emit_metric(
                 room_name,
@@ -719,6 +1383,11 @@ async def entrypoint(ctx: agents.JobContext):
             if mapped == "user":
                 return
             _emit_transcript(room_name, mapped, text)
+            if mapped == "agent":
+                runtime.finish_assistant_turn(
+                    text,
+                    interrupted=getattr(item, "interrupted", False),
+                )
 
     @session.on("metrics_collected")
     def _on_metrics(ev):
@@ -834,9 +1503,10 @@ async def entrypoint(ctx: agents.JobContext):
                 "sip_answered",
                 duration_ms=round((time.perf_counter() - dial_started) * 1000, 2),
             )
-            await session.generate_reply(
-                instructions=config.INITIAL_GREETING,
+            await session.say(
+                config.INITIAL_GREETING,
                 allow_interruptions=True,
+                add_to_chat_ctx=True,
             )
         except asyncio.TimeoutError:
             logger.warning(
@@ -866,9 +1536,10 @@ async def entrypoint(ctx: agents.JobContext):
             "ready_for_existing_participant",
             duration_ms=round((time.perf_counter() - call_started) * 1000, 2),
         )
-        await session.generate_reply(
-            instructions=config.FALLBACK_GREETING,
+        await session.say(
+            config.INITIAL_GREETING,
             allow_interruptions=True,
+            add_to_chat_ctx=True,
         )
 
     async def _on_shutdown():

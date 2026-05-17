@@ -31,17 +31,24 @@ FRONTEND_URL=http://localhost:3000
 BETTER_AUTH_URL=http://localhost:4000
 BETTER_AUTH_SECRET=<32-byte-dev-secret>
 PYTHON_DISPATCH_URL=https://call-agent.protechplanner.com/api/dispatch
-GROQ_BASE_URL=https://api.groq.com/openai/v1
-GROQ_MODEL=llama-3.3-70b-versatile
+GROQ_BASE_URL=https://gateway.ai.cloudflare.com/v1/<account_id>/<gateway_id>/compat
+GROQ_MODEL=groq/llama-3.3-70b-versatile
+CLOUDFLARE_AI_GATEWAY_TOKEN=<only-if-authenticated-gateway-is-on>
 ```
 
 Optional provider keys (used when you switch model providers):
 
 ```ini
 GROQ_API_KEY=<groq-key>
+CLOUDFLARE_AI_GATEWAY_TOKEN=<cloudflare-ai-gateway-run-token>
 DEEPGRAM_API_KEY=<deepgram-key>
 SARVAM_API_KEY=<sarvam-key>
 ```
+
+Use the same `GROQ_BASE_URL` value in the Python agent `.env` when routing
+the live voice worker through Cloudflare AI Gateway or a Worker proxy. If
+Authenticated Gateway is enabled, set `CLOUDFLARE_AI_GATEWAY_TOKEN` too; the
+Groq API key remains the provider key.
 
 ## API endpoints
 
